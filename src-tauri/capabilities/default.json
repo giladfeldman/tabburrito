@@ -1,0 +1,27 @@
+{
+  "identifier": "default",
+  "description": "Default capability for Tabburrito",
+  "windows": ["*"],
+  "webviews": ["sidebar", "urlbar"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-create",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-inner-size",
+    "core:window:allow-maximize",
+    "core:window:allow-unminimize",
+    "core:webview:default",
+    "core:webview:allow-create-webview",
+    "core:webview:allow-create-webview-window",
+    "core:webview:allow-set-webview-focus",
+    "core:webview:allow-webview-close",
+    "shell:default",
+    "autostart:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
+  ]
+}

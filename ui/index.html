@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Tabburrito</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="dark">
+  <div id="service-icons"></div>
+  <div id="sidebar-bottom">
+    <button id="btn-mute" class="sidebar-btn" title="Mute/Unmute (Ctrl+M)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M11 5L6 9H2v6h4l5 4V5z"/>
+        <path id="mute-waves" d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.08"/>
+      </svg>
+    </button>
+    <button id="btn-refresh" class="sidebar-btn" title="Refresh (Ctrl+R)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="23 4 23 10 17 10"/>
+        <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/>
+      </svg>
+    </button>
+    <button id="btn-autostart" class="sidebar-btn" title="Autostart: Off">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M18.36 6.64a9 9 0 11-12.73 0"/>
+        <line x1="12" y1="2" x2="12" y2="12"/>
+      </svg>
+    </button>
+    <button id="btn-dark" class="sidebar-btn" title="Dark Mode (Ctrl+D)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/>
+      </svg>
+    </button>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

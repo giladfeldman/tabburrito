@@ -1,0 +1,31 @@
+# Rust build artifacts
+src-tauri/target/
+
+# Node modules
+node_modules/
+
+# Generated schemas (rebuilt on compile)
+src-tauri/gen/
+
+# Environment files
+.env
+.env.local
+
+# OS files
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Tauri debug/release bundles
+*.msi
+*.nsis
+
+# Logs
+*.log
+
+# Archive (old/test files)
+archive/
