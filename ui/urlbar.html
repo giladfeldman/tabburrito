@@ -45,16 +45,21 @@
     #adblock-indicator { font-size: 10px; color: #22c55e; display: none; cursor: pointer; }
     #adblock-indicator.visible { display: inline; }
     #adblock-indicator.disabled { color: #666; }
+    .bar-btn.warn { color: #f97316; }
+    .bar-btn.danger { color: #ef4444; }
   </style>
 </head>
 <body>
   <span id="svc-label">...</span>
   <input id="url-input" type="text" placeholder="URL..." />
   <button class="bar-btn" id="btn-go" title="Navigate">&#x2192;</button>
+  <button class="bar-btn" id="btn-open" title="Open Service">&#x25B6;</button>
+  <button class="bar-btn warn" id="btn-reload" title="Reload Service">&#x21BB;</button>
+  <button class="bar-btn danger" id="btn-close" title="Close Service">&#x2715;</button>
   <button class="bar-btn" id="btn-zout" title="Zoom Out (Ctrl+-)">&#x2212;</button>
   <span id="zoom-label">100%</span>
   <button class="bar-btn" id="btn-zin" title="Zoom In (Ctrl+=)">+</button>
-  <span id="adblock-indicator" title="Click to toggle LinkedIn ad blocker">&#x1F6E1; AdBlock</span>
+  <span id="adblock-indicator" title="Click to toggle ad blocker">&#x1F6E1; AdBlock</span>
   <script src="urlbar.js"></script>
 </body>
 </html>

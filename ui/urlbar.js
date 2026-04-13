@@ -10,13 +10,15 @@ const SERVICES = [
 
 let currentService = null;
 let zoomLevels = {}; // { serviceId: zoomPercent }
-let adblockEnabled = true;
+let adblockByService = {}; // { serviceId: bool }
+let closedServices = {}; // { serviceId: bool }
 
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem('tabburrito_urlbar') || '{}');
     zoomLevels = s.zoom || {};
-    adblockEnabled = s.adblock !== undefined ? s.adblock : true;
+    adblockByService = s.adblock || {};
+    closedServices = s.closed || {};
     // Load custom URLs
     if (s.urls) {
       for (const svc of SERVICES) {
@@ -31,9 +33,26 @@ function saveState() {
   SERVICES.forEach(s => urls[s.id] = s.url);
   localStorage.setItem('tabburrito_urlbar', JSON.stringify({
     zoom: zoomLevels,
-    adblock: adblockEnabled,
+    adblock: adblockByService,
+    closed: closedServices,
     urls: urls,
   }));
+}
+
+function getAdblock(id) {
+  if (adblockByService[id] === undefined) return id === 'linkedin';
+  return adblockByService[id];
+}
+
+function setAdblock(id, enabled) {
+  adblockByService[id] = enabled;
+  saveState();
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('set_adblock_service', {
+      serviceId: id,
+      enabled: enabled,
+    }).catch(() => {});
+  }
 }
 
 function getZoom(id) {
@@ -61,15 +80,12 @@ function updateForService(id) {
   document.getElementById('url-input').value = svc.url;
   document.getElementById('zoom-label').textContent = getZoom(id) + '%';
 
-  // Show adblock indicator only for LinkedIn
+  // Adblock indicator per service
   const ab = document.getElementById('adblock-indicator');
-  if (id === 'linkedin') {
-    ab.classList.add('visible');
-    ab.classList.toggle('disabled', !adblockEnabled);
-    ab.textContent = adblockEnabled ? '\u{1F6E1} AdBlock On' : '\u{1F6E1} AdBlock Off';
-  } else {
-    ab.classList.remove('visible');
-  }
+  const enabled = getAdblock(id);
+  ab.classList.add('visible');
+  ab.classList.toggle('disabled', !enabled);
+  ab.textContent = enabled ? '\u{1F6E1} AdBlock On' : '\u{1F6E1} AdBlock Off';
 
   // Apply saved zoom
   const zoom = getZoom(id);
@@ -133,16 +149,49 @@ document.getElementById('btn-zout').addEventListener('click', () => {
 });
 
 document.getElementById('adblock-indicator').addEventListener('click', () => {
-  adblockEnabled = !adblockEnabled;
-  saveState();
-  const ab = document.getElementById('adblock-indicator');
-  ab.classList.toggle('disabled', !adblockEnabled);
-  ab.textContent = adblockEnabled ? '\u{1F6E1} AdBlock On' : '\u{1F6E1} AdBlock Off';
-  // Refresh LinkedIn to apply/remove
-  if (currentService === 'linkedin' && window.__TAURI__) {
-    window.__TAURI__.core.invoke('refresh_service', { label: 'linkedin' }).catch(() => {});
+  if (!currentService) return;
+  const enabled = !getAdblock(currentService);
+  setAdblock(currentService, enabled);
+  updateForService(currentService);
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('reload_service', { label: currentService }).catch(() => {});
   }
 });
+
+function openServiceTab() {
+  if (!currentService) return;
+  const svc = SERVICES.find(s => s.id === currentService);
+  if (!svc) return;
+  closedServices[currentService] = false;
+  saveState();
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('navigate_service', {
+      label: currentService,
+      url: svc.url,
+    }).catch(() => {});
+  }
+}
+
+function reloadServiceTab() {
+  if (!currentService || !window.__TAURI__) return;
+  window.__TAURI__.core.invoke('reload_service', {
+    label: currentService,
+  }).catch(() => {});
+}
+
+function closeServiceTab() {
+  if (!currentService || !window.__TAURI__) return;
+  closedServices[currentService] = true;
+  saveState();
+  window.__TAURI__.core.invoke('navigate_service', {
+    label: currentService,
+    url: 'about:blank',
+  }).catch(() => {});
+}
+
+document.getElementById('btn-open').addEventListener('click', openServiceTab);
+document.getElementById('btn-reload').addEventListener('click', reloadServiceTab);
+document.getElementById('btn-close').addEventListener('click', closeServiceTab);
 
 // Init
 loadState();
@@ -151,4 +200,15 @@ try {
   updateForService(s.active || 'whatsapp');
 } catch {
   updateForService('whatsapp');
+}
+
+// Sync adblock defaults to Rust at startup.
+if (window.__TAURI__) {
+  SERVICES.forEach(svc => {
+    const enabled = getAdblock(svc.id);
+    window.__TAURI__.core.invoke('set_adblock_service', {
+      serviceId: svc.id,
+      enabled: enabled,
+    }).catch(() => {});
+  });
 }

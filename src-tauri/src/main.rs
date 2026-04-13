@@ -1,6 +1,9 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -14,18 +17,66 @@ const SIDEBAR_W: f64 = 56.0;
 const URLBAR_H: f64 = 32.0;
 const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+fn exe_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn webview_data_dir(label: &str) -> std::path::PathBuf {
+    exe_dir().join("TabburritoWebViewData").join(label)
+}
+
+const GOOGLE_TRANSLATE_JS: &str = r#"
+(function() {
+    function injectGT() {
+        if (document.getElementById('google_translate_element')) return;
+        
+        const div = document.createElement('div');
+        div.id = 'google_translate_element';
+        div.style.position = 'fixed';
+        div.style.bottom = '20px';
+        div.style.right = '20px';
+        div.style.zIndex = '9999999';
+        div.style.backgroundColor = '#fff';
+        div.style.borderRadius = '8px';
+        div.style.boxShadow = '0 2px 10px rgba(0,0,0,0.2)';
+        div.style.padding = '8px';
+        document.body.appendChild(div);
+
+        window.googleTranslateElementInit = function() {
+            new window.google.translate.TranslateElement({
+                pageLanguage: 'auto',
+                layout: window.google.translate.TranslateElement.InlineLayout.SIMPLE,
+                autoDisplay: false
+            }, 'google_translate_element');
+        };
+
+        const script = document.createElement('script');
+        script.src = 'https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit';
+        document.head.appendChild(script);
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', injectGT);
+    } else {
+        injectGT();
+    }
+})();
+"#;
+
 struct Service {
     id: &'static str,
     url: &'static str,
-    notify_default: bool,
 }
 
 const SERVICES: &[Service] = &[
-    Service { id: "whatsapp", url: "https://web.whatsapp.com", notify_default: true },
-    Service { id: "messenger", url: "https://www.messenger.com", notify_default: true },
-    Service { id: "linkedin", url: "https://www.linkedin.com/feed/", notify_default: false },
-    Service { id: "bluesky", url: "https://bsky.app", notify_default: false },
-    Service { id: "calendar", url: "https://accounts.google.com/ServiceLogin?continue=https://calendar.google.com/calendar/u/0/r?hl%3Den&hl=en", notify_default: false },
+    Service { id: "whatsapp", url: "https://web.whatsapp.com" },
+    Service { id: "messenger", url: "https://www.messenger.com" },
+    Service { id: "linkedin", url: "https://www.linkedin.com/feed/" },
+    Service { id: "bluesky", url: "https://bsky.app" },
+    Service { id: "calendar", url: "https://accounts.google.com/ServiceLogin?continue=https://calendar.google.com/calendar/u/0/r?hl%3Den&hl=en" },
 ];
 
 // LinkedIn ad/noise blocker — JS-based, replicates uBlock Origin approach:
@@ -188,6 +239,36 @@ const LINKEDIN_ADBLOCK_JS: &str = r#"
 })();
 "#;
 
+struct AdblockState {
+    enabled: Mutex<HashMap<String, bool>>,
+}
+
+impl AdblockState {
+    fn new() -> Self {
+        let mut map = HashMap::new();
+        map.insert("linkedin".to_string(), true);
+        Self {
+            enabled: Mutex::new(map),
+        }
+    }
+
+    fn is_enabled(&self, service_id: &str) -> bool {
+        self.enabled
+            .lock()
+            .unwrap()
+            .get(service_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn set_enabled(&self, service_id: &str, enabled: bool) {
+        self.enabled
+            .lock()
+            .unwrap()
+            .insert(service_id.to_string(), enabled);
+    }
+}
+
 #[tauri::command]
 async fn show_service(app: tauri::AppHandle, label: String) -> Result<(), String> {
     for svc in SERVICES {
@@ -232,6 +313,25 @@ async fn zoom_service(app: tauri::AppHandle, label: String, zoom: f64) -> Result
 }
 
 #[tauri::command]
+async fn reload_service(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    if let Some(wv) = app.get_webview(&label) {
+        wv.eval("location.reload()").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_adblock_service(
+    app: tauri::AppHandle,
+    service_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let state = app.state::<AdblockState>();
+    state.set_enabled(&service_id, enabled);
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
@@ -259,11 +359,14 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .manage(AdblockState::new())
         .invoke_handler(tauri::generate_handler![
             show_service,
             refresh_service,
             navigate_service,
             zoom_service,
+            reload_service,
+            set_adblock_service,
             get_autostart_enabled,
             set_autostart_enabled,
         ])
@@ -276,21 +379,17 @@ fn main() {
                 .visible(true)
                 .build()?;
 
-            // Use the monitor work area (screen minus taskbar) for sizing
-            // This ensures webviews fill correctly when maximized
+            // Use the actual window inner size (client area) for sizing
+            // This prevents the webview from hiding behind the taskbar when maximized
             let scale = window.scale_factor().unwrap_or(1.0);
-            let (w, h) = if let Ok(Some(monitor)) = window.current_monitor() {
-                let wa = monitor.work_area();
-                (wa.size.width as f64 / scale, wa.size.height as f64 / scale)
-            } else {
-                let win_size = window.inner_size().unwrap_or(tauri::PhysicalSize::new(1920, 1080));
-                (win_size.width as f64 / scale, win_size.height as f64 / scale)
-            };
+            let win_size = window.inner_size().unwrap_or(tauri::PhysicalSize::new(1920, 1080));
+            let (w, h) = (win_size.width as f64 / scale, win_size.height as f64 / scale);
             let content_w = w - SIDEBAR_W;
 
             // Sidebar
             window.add_child(
                 WebviewBuilder::new("sidebar", WebviewUrl::App("index.html".into()))
+                    .data_directory(webview_data_dir("sidebar"))
                     .auto_resize(),
                 LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(SIDEBAR_W, h),
@@ -298,44 +397,46 @@ fn main() {
 
             // Service webviews — offset by URL bar height
             let app_handle = app.handle().clone();
-            for (i, svc) in SERVICES.iter().enumerate() {
+            for svc in SERVICES.iter() {
                 let url: url::Url = svc.url.parse().unwrap();
-                let ah = app_handle.clone();
-                let svc_id = svc.id.to_string();
+                #[cfg(not(target_os = "windows"))]
+                let app_handle_for_new_window = app_handle.clone();
                 let mut builder = WebviewBuilder::new(svc.id, WebviewUrl::External(url))
                     .user_agent(CHROME_UA)
+                    .data_directory(webview_data_dir(svc.id))
                     .auto_resize()
+                    .initialization_script(GOOGLE_TRANSLATE_JS)
                     .zoom_hotkeys_enabled(true)
                     .on_navigation(|_| true)
                     .on_new_window(move |url, _features| {
-                        // Handle popups (Google OAuth, etc.) by opening in a new window
-                        static POPUP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                        let n = POPUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let label = format!("popup-{}-{}", svc_id, n);
-
-                        match tauri::WebviewWindowBuilder::new(
-                            &ah,
-                            &label,
-                            WebviewUrl::External(url.clone()),
-                        )
-                        .user_agent(CHROME_UA)
-                        .title(url.as_str())
-                        .inner_size(600.0, 700.0)
-                        .build()
+                        // Open new windows/tabs in the default system browser instead of a new Tauri window
+                        #[cfg(target_os = "windows")]
                         {
-                            Ok(win) => NewWindowResponse::Create { window: win },
-                            Err(_) => NewWindowResponse::Allow,
+                            // Avoid tauri-plugin-shell bug on Windows where CMD truncates URLs at '&' characters
+                            let _ = std::process::Command::new("rundll32")
+                                .args(["url.dll,FileProtocolHandler", url.as_str()])
+                                .spawn();
                         }
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            let shell = app_handle_for_new_window.shell();
+                            let _ = shell.open(url.as_str(), None);
+                        }
+                        NewWindowResponse::Deny
                     });
 
                 // LinkedIn: inject adblock via on_page_load (avoids CSP blocking)
                 if svc.id == "linkedin" {
                     let script = LINKEDIN_ADBLOCK_JS.to_string();
+                    let app_handle_for_adblock = app_handle.clone();
+                    let svc_id = svc.id.to_string();
                     builder = builder
-                        .initialization_script(LINKEDIN_ADBLOCK_JS)
                         .on_page_load(move |webview, payload| {
                             if payload.event() == PageLoadEvent::Finished {
-                                let _ = webview.eval(&script);
+                                let state = app_handle_for_adblock.state::<AdblockState>();
+                                if state.is_enabled(&svc_id) {
+                                    let _ = webview.eval(&script);
+                                }
                             }
                         });
                 }
@@ -352,6 +453,7 @@ fn main() {
             // URL bar webview (between sidebar and content)
             window.add_child(
                 WebviewBuilder::new("urlbar", WebviewUrl::App("urlbar.html".into()))
+                    .data_directory(webview_data_dir("urlbar"))
                     .auto_resize(),
                 LogicalPosition::new(SIDEBAR_W, 0.0),
                 LogicalSize::new(content_w, URLBAR_H),

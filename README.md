@@ -1,78 +1,80 @@
 # Tabburrito
 
-A lightweight multi-service web app dock built with [Tauri](https://tauri.app). Replaces Electron-based apps like Ferdium with a native, memory-efficient alternative.
+Tabburrito currently has two tracks:
 
-**Memory usage**: ~35 MB base + ~100-150 MB per active service (shared WebView2 renderer)
-compared to Ferdium's 3+ GB for the same services.
+- `tabburrito-lite/`: the main Firefox-based product direction
+- root `src-tauri/` + `ui/`: the older WebView2 experiment kept as reference
 
-## Services
+The default recommendation is `Firefox Lite`.
 
-- WhatsApp Web
-- Facebook Messenger
-- LinkedIn (with built-in ad blocker)
-- Bluesky
-- Google Calendar
+## Current Product Direction
 
-## Features
+Firefox Lite is built around:
 
-- **Single window** — sidebar with service icons, content area with native WebView2
-- **URL bar** — view and edit the current URL per service
-- **Zoom controls** — per-service zoom level, remembered across restarts
-- **System tray** — minimize to tray, double-click to restore, right-click for menu
-- **Close to tray** — closing the window hides it instead of quitting
-- **Single instance** — launching again focuses the existing window
-- **Remember last service** — restores your last active tab on startup
-- **Window state** — remembers position and size across restarts
-- **Autostart** — optional, toggle from the sidebar (power icon)
-- **Dark mode** — toggle from the sidebar (moon icon)
-- **LinkedIn ad blocker** — hides Promoted posts, Suggested content, sidebar ads. Uses JavaScript injection mimicking uBlock Origin filter rules. Toggle from the URL bar indicator.
-- **Google sign-in** — works via accounts.google.com redirect flow (Google blocks embedded webview OAuth)
-- **Keyboard shortcuts**:
-  - `Ctrl+1-5` — switch between services
-  - `Ctrl+R` — refresh current service
-  - `Ctrl+M` — mute/unmute
-  - `Ctrl+D` — toggle dark mode
-  - `Ctrl+=`/`Ctrl+-` — zoom in/out
+- a project-local Tauri controller: `tabburrito-lite.exe`
+- a project-local isolated Firefox profile under `TabburritoLite\profile`
+- a rebranded project-local Firefox runtime: `TabburritoFirefox\tabburrito-browser.exe`
 
-## Requirements
+This keeps Tabburrito separate from your normal Firefox usage while also making it visually distinct in Task Manager, Alt-Tab, and the taskbar.
 
-- Windows 10 (1803+) or Windows 11
-- WebView2 Runtime (pre-installed on Windows 11)
+## Important Entry Points
 
-## Quick Start
+For Firefox Lite, launch:
 
-Download `tabburrito.exe` from the [Releases](https://github.com/giladfeldman/tabburrito/releases) page and run it. No installation needed.
+- `build\cargo-target-firefox-lite\release\tabburrito-lite.exe`
 
-## Building from Source
+Do not launch the browser runtime directly unless you are debugging packaging:
 
-### Prerequisites
+- `build\cargo-target-firefox-lite\release\TabburritoFirefox\tabburrito-browser.exe`
 
-- [Rust](https://rustup.rs/) (1.70+)
-- [Node.js](https://nodejs.org/) (18+)
-- WebView2 Runtime
+The tray/controller logic lives in `tabburrito-lite.exe`. Launching the browser runtime directly bypasses tray behavior and Tabburrito startup management.
 
-### Build
+## Runtime Storage Rules
 
-```bash
-npm install
-cargo build --release --manifest-path src-tauri/Cargo.toml
+Everything is kept inside this project directory:
+
+- Rust toolchains and caches live under `build\`
+- Firefox Lite runtime data lives next to the Lite exe under `TabburritoLite\`
+- rebranded Firefox runtime lives under `build\cargo-target-firefox-lite\release\TabburritoFirefox\`
+- WebView2 runtime data lives next to the WebView2 exe under `TabburritoWebViewData\`
+
+No intentional runtime storage should be left behind in the user profile for this project.
+
+## Firefox Lite Highlights
+
+- isolated Firefox profile launched with `--profile` and `--no-remote`
+- rebranded runtime name: `tabburrito-browser.exe`
+- tray shell for open, refresh, mute, close-tab, restart, autostart, reset, and diagnostics
+- all 5 managed services are treated as the fixed Tabburrito workspace:
+  - WhatsApp
+  - Messenger
+  - LinkedIn
+  - Bluesky
+  - Google Calendar
+- LinkedIn ad blocking is handled in the isolated Firefox profile
+- dark/light custom browser chrome
+
+## Build
+
+Use the project-local Rust toolchain wrapper:
+
+```powershell
+.\build_local.bat build --manifest-path tabburrito-lite\src-tauri\Cargo.toml
 ```
 
-The release binary is at `src-tauri/target/release/tabburrito.exe` (12 MB).
+Or build packaged outputs with:
 
-### Development
-
-```bash
-npm install
-npx tauri dev
+```powershell
+.\release.bat lite
 ```
 
-### Generate Icons
+That produces:
 
-```bash
-node generate_icons.js
-```
+- `build\cargo-target-firefox-lite\release\tabburrito-lite.exe`
+- `build\cargo-target-firefox-lite\release\TabburritoFirefox\tabburrito-browser.exe`
 
-## License
+## Other Docs
 
-MIT
+- [tabburrito-lite/README.md](tabburrito-lite/README.md)
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+- [lessons.md](lessons.md)

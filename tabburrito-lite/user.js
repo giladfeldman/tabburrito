@@ -18,6 +18,7 @@ user_pref("dom.ipc.processCount.webIsolated", 1);
 
 // Unload tabs when memory is low
 user_pref("browser.tabs.unloadOnLowMemory", true);
+user_pref("browser.tabs.min_inactive_duration_before_unload", 600000);
 
 // WebRender yes, but GPU process in-process (saves 200-500MB separate process)
 user_pref("gfx.webrender.all", true);
@@ -31,6 +32,7 @@ user_pref("browser.sessionhistory.max_entries", 10);
 
 // Cap in-memory cache at 128MB (default unlimited)
 user_pref("browser.cache.memory.capacity", 131072);
+user_pref("browser.cache.disk.enable", false);
 
 // Disable speculative pre-connections and prefetching
 user_pref("network.http.speculative-parallel-limit", 0);
@@ -87,8 +89,16 @@ user_pref("app.update.enabled", false);
 // ============================================================
 // UI — Minimal chrome, dark mode
 // ============================================================
-// Start with previous session (remembers pinned tabs)
-user_pref("browser.startup.page", 3);
+// Let Tabburrito control startup tabs explicitly.
+user_pref("browser.startup.page", 1);
+user_pref("browser.sessionstore.restore_on_demand", false);
+user_pref("browser.sessionstore.restore_tabs_lazily", false);
+user_pref("browser.sessionstore.max_tabs_undo", 3);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("startup.homepage_welcome_url", "");
+user_pref("startup.homepage_welcome_url.additional", "");
+user_pref("browser.shell.didSkipDefaultBrowserCheckOnFirstRun", true);
+user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
 
 // Dark theme
 user_pref("ui.systemUsesDarkTheme", 1);
@@ -102,6 +112,8 @@ user_pref("browser.uidensity", 1);
 // Disable animations for speed
 user_pref("ui.prefersReducedMotion", 1);
 user_pref("toolkit.cosmeticAnimations.enabled", false);
+user_pref("browser.tabs.animate", false);
+user_pref("browser.fullscreen.animate", false);
 
 // ============================================================
 // PRIVACY — Reasonable defaults (not paranoid)

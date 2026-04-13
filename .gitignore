@@ -1,5 +1,7 @@
 # Rust build artifacts
 src-tauri/target/
+tabburrito-lite/src-tauri/target/
+testopen/target/
 
 # Node modules
 node_modules/
@@ -23,9 +25,14 @@ desktop.ini
 # Tauri debug/release bundles
 *.msi
 *.nsis
+*.pdb
+artifacts/
+build/
+TabburritoLite/
 
 # Logs
 *.log
+*.txt
 
 # Archive (old/test files)
 archive/
