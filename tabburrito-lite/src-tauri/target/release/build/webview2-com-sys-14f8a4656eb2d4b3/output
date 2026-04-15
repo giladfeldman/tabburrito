@@ -1,2 +1,0 @@
-cargo:rustc-link-search=native=C:\Users\filin\Dropbox\Vibe\WindowsTuneUp\tabburrito-lite\src-tauri\target\release\build\webview2-com-sys-14f8a4656eb2d4b3\out\x64
-cargo:rustc-link-lib=advapi32

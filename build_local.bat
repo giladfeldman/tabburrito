@@ -11,21 +11,27 @@ if not exist "%CARGO_HOME%" mkdir "%CARGO_HOME%" >nul 2>&1
 if not exist "%RUSTUP_HOME%" mkdir "%RUSTUP_HOME%" >nul 2>&1
 
 set "TOOLS_DIR=%ROOT%build\\tools"
-set "SYSTEM_CARGO=C:\Users\filin\.cargo\bin\cargo.exe"
-set "SYSTEM_RUSTUP=C:\Users\filin\.cargo\bin\rustup.exe"
 set "CARGO=%TOOLS_DIR%\\cargo.exe"
 set "RUSTUP=%TOOLS_DIR%\\rustup.exe"
 if not exist "%TOOLS_DIR%" mkdir "%TOOLS_DIR%" >nul 2>&1
 
 if not exist "%CARGO%" (
-    if exist "%SYSTEM_CARGO%" copy "%SYSTEM_CARGO%" "%CARGO%" >nul 2>&1
+    for /f "delims=" %%I in ('where cargo 2^>nul') do (
+        if not exist "%CARGO%" copy "%%I" "%CARGO%" >nul 2>&1
+    )
 )
 
 if not exist "%RUSTUP%" (
-    if exist "%SYSTEM_RUSTUP%" copy "%SYSTEM_RUSTUP%" "%RUSTUP%" >nul 2>&1
+    for /f "delims=" %%I in ('where rustup 2^>nul') do (
+        if not exist "%RUSTUP%" copy "%%I" "%RUSTUP%" >nul 2>&1
+    )
 )
 if not exist "%CARGO%" (
-    echo ERROR: cargo not found. Expected %CARGO% or %SYSTEM_CARGO%
+    echo ERROR: cargo not found. Install Rust or place cargo.exe in build\tools.
+    exit /b 1
+)
+if not exist "%RUSTUP%" (
+    echo ERROR: rustup not found. Install Rust or place rustup.exe in build\tools.
     exit /b 1
 )
 

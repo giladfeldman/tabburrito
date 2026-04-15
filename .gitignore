@@ -1,4 +1,5 @@
 # Rust build artifacts
+**/target/
 src-tauri/target/
 tabburrito-lite/src-tauri/target/
 testopen/target/
@@ -8,6 +9,7 @@ node_modules/
 
 # Generated schemas (rebuilt on compile)
 src-tauri/gen/
+tabburrito-lite/src-tauri/gen/
 
 # Environment files
 .env
@@ -29,6 +31,8 @@ desktop.ini
 artifacts/
 build/
 TabburritoLite/
+TabburritoWebViewData/
+TabburritoFirefox/
 
 # Logs
 *.log

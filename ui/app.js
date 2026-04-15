@@ -136,7 +136,7 @@ function toggleMute() {
     : 'M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.08');
   saveState();
 }
-window.__webdock_toggleMute = toggleMute;
+window.__tabburrito_toggleMute = toggleMute;
 
 function toggleDark() {
   isDark = !isDark;

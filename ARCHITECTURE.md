@@ -2,79 +2,33 @@
 
 ## Current Shape
 
-The repo currently contains two product lines:
+The repo contains two product tracks:
 
-- Firefox Lite: the mainline product
-- WebView2: a legacy/reference implementation
+- WebView2 Portable: current main product
+- Firefox Lite: alternate isolated-Firefox experiment
 
-The architecture that matters most now is Firefox Lite.
+The WebView2 app is now the main direction because it gives Tabburrito ownership of the visible window and shell controls while staying reasonably memory-conscious after optimization.
 
-## Firefox Lite Overview
-
-Firefox Lite is split into two runtime parts:
-
-1. `tabburrito-lite.exe`
-   The Tauri controller. It owns tray behavior, shortcuts, startup, restart, quit, profile bootstrap, and diagnostics.
-
-2. `tabburrito-browser.exe`
-   The rebranded packaged Firefox runtime used only by the Lite controller.
-
-The controller launches the browser runtime against a dedicated profile:
-
-- `--profile <exe-folder>\TabburritoLite\profile`
-- `--no-remote`
-
-That gives Tabburrito an isolated browser world while still allowing the user’s normal Firefox to continue separately.
-
-## Firefox Lite Responsibilities
-
-### Controller
+## WebView2 Portable
 
 Implemented in:
 
-- [tabburrito-lite/src-tauri/src/main.rs](/C:/Users/filin/Dropbox/Vibe/WindowsTuneUp/tabburrito-lite/src-tauri/src/main.rs)
+- `src-tauri/src/main.rs`
+- `ui/`
 
-Responsibilities:
+Runtime entrypoint:
 
-- tray icon and tray menu
-- global shortcuts
-- startup and reopen behavior
-- theme toggling
-- refresh, mute, close-tab helpers
-- profile reset and status output
-- packaged runtime discovery
-- shutdown ownership
+- `tabburrito.exe`
 
-### Browser Runtime
+Portable data folder:
 
-Packaged into:
+- `<exe-folder>\TabburritoWebViewData\main\`
 
-- `build\cargo-target-firefox-lite\release\TabburritoFirefox\`
-
-Important file:
-
-- `tabburrito-browser.exe`
-
-This runtime exists primarily so Windows surfaces can identify Tabburrito separately from normal Firefox.
-
-### Profile Bootstrap
-
-Profile assets come from:
-
-- [tabburrito-lite/user.js](/C:/Users/filin/Dropbox/Vibe/WindowsTuneUp/tabburrito-lite/user.js)
-- generated `userChrome.css`
-
-Responsibilities:
-
-- memory/performance prefs
-- Firefox UI shaping
-- title prefix and distinctive chrome
-- LinkedIn filter file generation
-- uBlock placement in the isolated profile
+The app uses one shared WebView2 user-data folder rather than one folder per service. This reduces process/runtime overhead and keeps sessions portable alongside the exe.
 
 ## Managed Services
 
-The Lite workspace is defined around 5 services:
+The workspace is intentionally fixed:
 
 - WhatsApp
 - Messenger
@@ -82,37 +36,82 @@ The Lite workspace is defined around 5 services:
 - Bluesky
 - Google Calendar
 
-The intended model is a fixed workspace, not an open-ended browser session.
+Default service temperature:
 
-## Build and Packaging
+- hot: WhatsApp, Google Calendar
+- cold after inactivity: Messenger, LinkedIn, Bluesky
 
-### Build isolation
+Cold services are hidden normally during short switches. After the inactivity grace period, they are navigated to `about:blank` to release memory. When selected again, the controller navigates them back to their service URL automatically.
 
-Rust tooling and outputs are intentionally local to the project:
+## WebView2 Shell Responsibilities
+
+The WebView2 shell owns:
+
+- sidebar service switching
+- URL/address bar
+- refresh/open controls
+- per-service navigation
+- LinkedIn ad/noise filtering
+- external-link handoff to the system default browser
+- portable WebView2 storage location
+- single-instance behavior
+- window/tray behavior where supported by Tauri
+
+## Firefox Lite
+
+Implemented in:
+
+- `tabburrito-lite/src-tauri/src/main.rs`
+- `tabburrito-lite/user.js`
+
+Runtime entrypoints:
+
+- `tabburrito-lite.exe`: controller
+- `tabburrito-browser.exe`: rebranded local Firefox runtime
+
+Firefox Lite launches the browser runtime with:
+
+- `--profile <exe-folder>\TabburritoLite\profile`
+- `--no-remote`
+
+This isolates it from the user’s normal Firefox profile. It remains useful, but the controller does not own the visible Firefox window, so behaviors like true minimize-to-tray and intercepting all in-page link behavior are limited without deeper Firefox extension/native integration.
+
+## Build Isolation
+
+Build tooling and outputs are intentionally local:
 
 - `build\cargo-home\`
 - `build\rustup-home\`
 - `build\tools\`
-- `build\cargo-target-firefox-lite\`
 - `build\cargo-target-webview2\`
+- `build\cargo-target-firefox-lite\`
 
-### Release packaging
+The wrapper `build_local.bat` copies `cargo.exe` and `rustup.exe` from `PATH` into `build\tools\` when needed, then uses local Cargo/Rustup home directories.
 
-`release.bat lite` does two things:
+## Release Helper
 
-1. builds `tabburrito-lite.exe`
-2. prepares `TabburritoFirefox\` by copying the local Firefox runtime, renaming the browser executable, and patching Windows-visible metadata
+`release.bat` supports:
 
-The runtime preparation step is:
+- `webview2`
+- `lite`
+- `all`
 
-- [prepare_firefox_runtime.bat](/C:/Users/filin/Dropbox/Vibe/WindowsTuneUp/prepare_firefox_runtime.bat)
+Examples:
 
-## WebView2 Status
+```powershell
+.\release.bat webview2
+.\release.bat lite
+.\release.bat all
+```
 
-The root `src-tauri/` + `ui/` app is still in the repo as a reference implementation, but it is no longer the primary architectural direction for daily use.
+## Public Repo Hygiene
 
-It remains useful as:
+Do not commit:
 
-- a source of UI ideas
-- a record of embedded-shell behavior
-- a fallback experiment track
+- `target/`
+- `build/`
+- `node_modules/`
+- runtime profiles
+- `TabburritoWebViewData/`
+- `TabburritoLite/`
+- cookies, login databases, session stores, or migration backups

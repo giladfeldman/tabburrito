@@ -1,80 +1,100 @@
 # Tabburrito
 
-Tabburrito currently has two tracks:
+Tabburrito is a portable Windows dock for a small fixed set of web services:
 
-- `tabburrito-lite/`: the main Firefox-based product direction
-- root `src-tauri/` + `ui/`: the older WebView2 experiment kept as reference
+- WhatsApp
+- Messenger
+- LinkedIn
+- Bluesky
+- Google Calendar
 
-The default recommendation is `Firefox Lite`.
+The current main product is the WebView2 build. It provides a native Tauri shell with a sidebar, address bar, refresh/open controls, LinkedIn ad filtering, external-link handoff, and a memory-conscious hot/cold service model.
 
-## Current Product Direction
+## Product Tracks
 
-Firefox Lite is built around:
+### Main: WebView2 Portable
 
-- a project-local Tauri controller: `tabburrito-lite.exe`
-- a project-local isolated Firefox profile under `TabburritoLite\profile`
-- a rebranded project-local Firefox runtime: `TabburritoFirefox\tabburrito-browser.exe`
+Source:
 
-This keeps Tabburrito separate from your normal Firefox usage while also making it visually distinct in Task Manager, Alt-Tab, and the taskbar.
+- `src-tauri/`
+- `ui/`
 
-## Important Entry Points
+Release exe:
 
-For Firefox Lite, launch:
+- `build\cargo-target-webview2\release\tabburrito.exe`
+
+Runtime data:
+
+- `TabburritoWebViewData\main\` next to the running exe
+
+That means a portable copy can carry its own sessions, cookies, local storage, and cache with it. Replacing the exe should not force re-login as long as the sibling `TabburritoWebViewData` folder is kept.
+
+### Alternate: Firefox Lite
+
+Source:
+
+- `tabburrito-lite/`
+
+Release exe:
 
 - `build\cargo-target-firefox-lite\release\tabburrito-lite.exe`
 
-Do not launch the browser runtime directly unless you are debugging packaging:
+Firefox Lite uses an isolated Firefox profile and a rebranded local Firefox runtime. It remains useful as an alternate low-memory direction, but it has practical limitations because the visible browser window is still Firefox-owned rather than shell-owned.
 
-- `build\cargo-target-firefox-lite\release\TabburritoFirefox\tabburrito-browser.exe`
+## WebView2 Behavior
 
-The tray/controller logic lives in `tabburrito-lite.exe`. Launching the browser runtime directly bypasses tray behavior and Tabburrito startup management.
+The WebView2 app is optimized around a small service workspace:
 
-## Runtime Storage Rules
+- always loaded: WhatsApp and Google Calendar
+- cold-load after inactivity: Messenger, LinkedIn, and Bluesky
+- cold services are restored automatically when selected
+- LinkedIn ad/noise blocking is enabled by default
+- new windows are opened in the system default browser
+- app data is stored relative to the portable exe
 
-Everything is kept inside this project directory:
-
-- Rust toolchains and caches live under `build\`
-- Firefox Lite runtime data lives next to the Lite exe under `TabburritoLite\`
-- rebranded Firefox runtime lives under `build\cargo-target-firefox-lite\release\TabburritoFirefox\`
-- WebView2 runtime data lives next to the WebView2 exe under `TabburritoWebViewData\`
-
-No intentional runtime storage should be left behind in the user profile for this project.
-
-## Firefox Lite Highlights
-
-- isolated Firefox profile launched with `--profile` and `--no-remote`
-- rebranded runtime name: `tabburrito-browser.exe`
-- tray shell for open, refresh, mute, close-tab, restart, autostart, reset, and diagnostics
-- all 5 managed services are treated as the fixed Tabburrito workspace:
-  - WhatsApp
-  - Messenger
-  - LinkedIn
-  - Bluesky
-  - Google Calendar
-- LinkedIn ad blocking is handled in the isolated Firefox profile
-- dark/light custom browser chrome
+The cold-load model is a memory tradeoff. It saves RAM by navigating inactive cold services to `about:blank` after a grace period, then reloading them automatically when selected.
 
 ## Build
 
-Use the project-local Rust toolchain wrapper:
+Use the project-local build wrapper:
 
 ```powershell
-.\build_local.bat build --manifest-path tabburrito-lite\src-tauri\Cargo.toml
+.\build_local.bat build --release --manifest-path src-tauri\Cargo.toml
 ```
 
-Or build packaged outputs with:
+Or use the release helper:
 
 ```powershell
-.\release.bat lite
+.\release.bat webview2
 ```
 
-That produces:
+Build both maintained tracks:
 
-- `build\cargo-target-firefox-lite\release\tabburrito-lite.exe`
-- `build\cargo-target-firefox-lite\release\TabburritoFirefox\tabburrito-browser.exe`
+```powershell
+.\release.bat all
+```
 
-## Other Docs
+Build outputs are intentionally ignored by git and live under `build\`.
 
-- [tabburrito-lite/README.md](tabburrito-lite/README.md)
+## Portable Runtime Rules
+
+Tabburrito is designed so project/runtime data is local to the portable folder:
+
+- Rust toolchain/cache wrappers live under `build\`
+- WebView2 data lives next to `tabburrito.exe` under `TabburritoWebViewData\`
+- Firefox Lite data lives next to `tabburrito-lite.exe` under `TabburritoLite\`
+- packaged Firefox runtime lives under `TabburritoFirefox\`
+
+Do not commit runtime profiles, cookies, session stores, build outputs, or personal data.
+
+## Development Notes
+
+- `archive/` is ignored and may contain local experiments, old exes, migration backups, or cleanup snapshots.
+- `node_modules/`, `build/`, `target/`, and runtime data folders are ignored.
+- `lessons.md` records the major implementation discoveries and regressions fixed during development.
+
+## Docs
+
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [lessons.md](lessons.md)
+- [tabburrito-lite/README.md](tabburrito-lite/README.md)
