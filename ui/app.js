@@ -1,11 +1,11 @@
 // Tabburrito sidebar
 
 const SERVICES = [
-  { id: 'whatsapp', name: 'WhatsApp', icon: '\u{1F4AC}' },
-  { id: 'messenger', name: 'Messenger', icon: '\u{1F535}' },
-  { id: 'linkedin', name: 'LinkedIn', icon: '\u{1F517}' },
-  { id: 'bluesky', name: 'Bluesky', icon: '\u{1F98B}' },
-  { id: 'calendar', name: 'Google Calendar', icon: '\u{1F4C5}' },
+  { id: 'whatsapp', name: 'WhatsApp', icon: 'WA' },
+  { id: 'messenger', name: 'Messenger', icon: 'MS' },
+  { id: 'linkedin', name: 'LinkedIn', icon: 'IN' },
+  { id: 'bluesky', name: 'Bluesky', icon: 'BS' },
+  { id: 'calendar', name: 'Google Calendar', icon: 'GC' },
 ];
 
 let activeService = null;
@@ -15,6 +15,8 @@ let notifyServices = ['whatsapp', 'messenger']; // default
 let unreadCounts = {}; // { serviceId: number }
 let unloadSeconds = 180;
 const UNLOAD_PRESETS = [60, 180, 600];
+let notifyModes = { whatsapp: 'full', messenger: 'full' }; // off | badge | full
+let dndUntil = 0;
 
 function loadState() {
   try {
@@ -24,6 +26,8 @@ function loadState() {
     activeService = s.active || null;
     if (s.notifyServices) notifyServices = s.notifyServices;
     unloadSeconds = Number(s.unloadSeconds) || 180;
+    notifyModes = s.notifyModes || { whatsapp: 'full', messenger: 'full' };
+    dndUntil = Number(s.dndUntil) || 0;
   } catch {}
 }
 
@@ -32,6 +36,8 @@ function saveState() {
     muted: isMuted, dark: isDark, active: activeService,
     notifyServices: notifyServices,
     unloadSeconds: unloadSeconds,
+    notifyModes: notifyModes,
+    dndUntil: dndUntil,
   }));
 }
 
@@ -47,10 +53,14 @@ function buildSidebar() {
     btn.innerHTML = `<span class="svc-emoji">${svc.icon}</span><span class="notif-dot"></span>`;
     btn.addEventListener('click', () => showService(svc.id));
 
-    // Right-click to toggle notification tracking
+    // Right-click toggles tracked service
     btn.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      toggleNotifyService(svc.id);
+      if (e.shiftKey) {
+        cycleNotifyMode(svc.id);
+      } else {
+        toggleNotifyService(svc.id);
+      }
     });
 
     c.appendChild(btn);
@@ -62,8 +72,10 @@ function toggleNotifyService(id) {
   if (idx >= 0) {
     notifyServices.splice(idx, 1);
     unreadCounts[id] = 0;
+    notifyModes[id] = 'off';
   } else {
     notifyServices.push(id);
+    notifyModes[id] = notifyModes[id] === 'off' ? 'badge' : (notifyModes[id] || 'full');
   }
   saveState();
   updateNotifyIndicators();
@@ -90,25 +102,52 @@ function updateNotifyIndicators() {
     const dot = btn.querySelector('.notif-dot');
     const isTracked = notifyServices.includes(svc.id);
     const count = unreadCounts[svc.id] || 0;
+    const mode = notifyModes[svc.id] || (isTracked ? 'full' : 'off');
 
     btn.classList.toggle('notify-tracked', isTracked);
     btn.classList.toggle('has-unread', isTracked && count > 0);
+    btn.classList.toggle('mode-badge', mode === 'badge');
+    btn.classList.toggle('mode-off', mode === 'off');
 
     if (!dot) return;
     if (isTracked && count > 0) {
       dot.textContent = formatBadgeCount(count);
-      btn.title = `${svc.name} — ${count} unread DM${count === 1 ? '' : 's'}`;
+      btn.title = `${svc.name} — ${count} unread DM${count === 1 ? '' : 's'} (${mode})`;
     } else {
       dot.textContent = '';
-      btn.title = isTracked ? `${svc.name} (notify on)` : svc.name;
+      btn.title = isTracked ? `${svc.name} (${mode})` : `${svc.name} (off)`;
     }
   });
 }
 
+function inDndWindow() {
+  return dndUntil > Date.now();
+}
+
+function maybeNotify(serviceId, count) {
+  if (!('Notification' in window)) return;
+  const mode = notifyModes[serviceId] || 'off';
+  if (mode !== 'full' || inDndWindow()) return;
+  const service = SERVICES.find(s => s.id === serviceId);
+  const title = service ? service.name : serviceId;
+  if (Notification.permission === 'granted') {
+    try {
+      new Notification(`Tabburrito: ${title}`, {
+        body: `${count} unread direct message${count === 1 ? '' : 's'}`,
+        silent: false,
+      });
+    } catch {}
+  } else if (Notification.permission !== 'denied') {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+
 function setUnreadCount(serviceId, count) {
   const n = Math.max(0, Math.floor(Number(count) || 0));
-  if (unreadCounts[serviceId] === n) return;
+  const prev = unreadCounts[serviceId] || 0;
+  if (prev === n) return;
   unreadCounts[serviceId] = n;
+  if (n > prev) maybeNotify(serviceId, n);
   updateNotifyIndicators();
 }
 
@@ -144,6 +183,49 @@ async function cycleMemoryPreset() {
   updateMemoryButton();
   if (window.__TAURI__) {
     await window.__TAURI__.core.invoke('set_unload_seconds', { seconds: unloadSeconds }).catch(() => {});
+  }
+}
+
+function updateDndButton() {
+  const btn = document.getElementById('btn-dnd');
+  if (!btn) return;
+  if (inDndWindow()) {
+    btn.classList.add('dnd-on');
+    const mins = Math.ceil((dndUntil - Date.now()) / 60000);
+    btn.title = `DND: On (${mins}m left)`;
+  } else {
+    btn.classList.remove('dnd-on');
+    btn.title = 'DND: Off (click to snooze)';
+  }
+}
+
+function cycleDnd() {
+  const now = Date.now();
+  if (!inDndWindow()) dndUntil = now + 15 * 60_000;
+  else if (dndUntil - now <= 15 * 60_000 + 5000) dndUntil = now + 60 * 60_000;
+  else if (dndUntil - now <= 60 * 60_000 + 5000) dndUntil = new Date(new Date().setHours(23, 59, 59, 999)).getTime();
+  else dndUntil = 0;
+  saveState();
+  updateDndButton();
+}
+
+function cycleNotifyMode(id) {
+  const current = notifyModes[id] || 'off';
+  const next = current === 'off' ? 'badge' : current === 'badge' ? 'full' : 'off';
+  notifyModes[id] = next;
+  if (next === 'off') {
+    notifyServices = notifyServices.filter(s => s !== id);
+    unreadCounts[id] = 0;
+  } else if (!notifyServices.includes(id)) {
+    notifyServices.push(id);
+  }
+  saveState();
+  updateNotifyIndicators();
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('set_notify_service', {
+      serviceId: id,
+      enabled: next !== 'off',
+    }).catch(() => {});
   }
 }
 
@@ -238,7 +320,54 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 'm') { e.preventDefault(); toggleMute(); }
   if (e.ctrlKey && e.key === 'd') { e.preventDefault(); toggleDark(); }
   if (e.ctrlKey && e.key === 'r') { e.preventDefault(); refreshCurrent(); }
+  if (e.ctrlKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openPalette(); }
+  if (e.key === 'Escape') closePalette();
 });
+
+function paletteCommands() {
+  const svcCmds = SERVICES.map(s => ({
+    label: `Switch: ${s.name}`,
+    run: () => showService(s.id),
+  }));
+  return [
+    ...svcCmds,
+    { label: 'Toggle mute', run: toggleMute },
+    { label: 'Refresh current', run: refreshCurrent },
+    { label: 'Cycle memory preset', run: cycleMemoryPreset },
+    { label: 'Cycle DND', run: cycleDnd },
+  ];
+}
+
+function renderPalette(filter = '') {
+  const list = document.getElementById('palette-list');
+  const q = filter.trim().toLowerCase();
+  const items = paletteCommands().filter(c => c.label.toLowerCase().includes(q));
+  list.innerHTML = '';
+  items.forEach((cmd, idx) => {
+    const row = document.createElement('div');
+    row.className = 'palette-item' + (idx === 0 ? ' active' : '');
+    row.textContent = cmd.label;
+    row.addEventListener('click', () => {
+      cmd.run();
+      closePalette();
+    });
+    list.appendChild(row);
+  });
+}
+
+function openPalette() {
+  const p = document.getElementById('command-palette');
+  const input = document.getElementById('palette-input');
+  p.classList.remove('hidden');
+  input.value = '';
+  renderPalette('');
+  setTimeout(() => input.focus(), 0);
+}
+
+function closePalette() {
+  const p = document.getElementById('command-palette');
+  p.classList.add('hidden');
+}
 
 function init() {
   loadState();
@@ -256,8 +385,11 @@ function init() {
   document.getElementById('btn-refresh').addEventListener('click', refreshCurrent);
   document.getElementById('btn-autostart').addEventListener('click', toggleAutostart);
   document.getElementById('btn-memory').addEventListener('click', cycleMemoryPreset);
+  document.getElementById('btn-dnd').addEventListener('click', cycleDnd);
+  document.getElementById('palette-input').addEventListener('input', (e) => renderPalette(e.target.value || ''));
 
   updateMemoryButton();
+  updateDndButton();
   initAutostart();
   initUnreadListener();
   syncNotifyServicesToRust();
@@ -267,6 +399,7 @@ function init() {
     window.__TAURI__.core.invoke('set_muted', { muted: isMuted }).catch(() => {});
     window.__TAURI__.core.invoke('set_unload_seconds', { seconds: unloadSeconds }).catch(() => {});
   }
+  setInterval(updateDndButton, 30_000);
 
   // Restore last service — wait for window maximize to complete
   // then show the service, which triggers proper webview sizing

@@ -1060,6 +1060,20 @@ fn emit_unread(app: &tauri::AppHandle, service_id: &str, count: u32) {
     );
 }
 
+fn update_tray_unread_tooltip(app: &tauri::AppHandle) {
+    let notify = app.state::<NotifyState>();
+    let counts = notify.counts.lock().unwrap();
+    let total: u32 = counts.values().copied().sum();
+    let tooltip = if total > 0 {
+        format!("Tabburrito - {total} unread DM")
+    } else {
+        "Tabburrito".to_string()
+    };
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
+}
+
 fn emit_active_service(app: &tauri::AppHandle, service_id: &str) {
     let _ = app.emit(
         "tb-active-service",
@@ -1094,6 +1108,7 @@ fn handle_service_title_changed(app: &tauri::AppHandle, service_id: &str, title:
     };
     if notify.set_count(service_id, count) {
         emit_unread(app, service_id, count);
+        update_tray_unread_tooltip(app);
     }
 }
 
