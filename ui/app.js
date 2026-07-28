@@ -8,15 +8,18 @@ const SERVICES = [
   { id: 'calendar', name: 'Google Calendar', icon: 'GC' },
 ];
 
+const UNLOAD_PRESETS = [60, 180, 600];
+
 let activeService = null;
 let isMuted = false;
 let isDark = true;
-let notifyServices = ['whatsapp', 'messenger']; // default
-let unreadCounts = {}; // { serviceId: number }
+let notifyServices = ['whatsapp', 'messenger'];
+let notifyModes = { whatsapp: 'full', messenger: 'full' }; // off|badge|full
+let unreadCounts = {};
 let unloadSeconds = 180;
-const UNLOAD_PRESETS = [60, 180, 600];
-let notifyModes = { whatsapp: 'full', messenger: 'full' }; // off | badge | full
 let dndUntil = 0;
+let resourceMode = 'balanced'; // lean|balanced|instant
+let profiles = {}; // {name: { sidebarState, portablePayload }}
 
 function loadState() {
   try {
@@ -24,21 +27,37 @@ function loadState() {
     isMuted = s.muted || false;
     isDark = s.dark !== undefined ? s.dark : true;
     activeService = s.active || null;
-    if (s.notifyServices) notifyServices = s.notifyServices;
-    unloadSeconds = Number(s.unloadSeconds) || 180;
-    notifyModes = s.notifyModes || { whatsapp: 'full', messenger: 'full' };
+    notifyServices = Array.isArray(s.notifyServices) ? s.notifyServices : notifyServices;
+    notifyModes = s.notifyModes || notifyModes;
+    unloadSeconds = Number(s.unloadSeconds) || unloadSeconds;
     dndUntil = Number(s.dndUntil) || 0;
+    resourceMode = s.resourceMode || resourceMode;
+    profiles = s.profiles || {};
   } catch {}
 }
 
 function saveState() {
   localStorage.setItem('tabburrito', JSON.stringify({
-    muted: isMuted, dark: isDark, active: activeService,
-    notifyServices: notifyServices,
-    unloadSeconds: unloadSeconds,
-    notifyModes: notifyModes,
-    dndUntil: dndUntil,
+    muted: isMuted,
+    dark: isDark,
+    active: activeService,
+    notifyServices,
+    notifyModes,
+    unloadSeconds,
+    dndUntil,
+    resourceMode,
+    profiles,
   }));
+}
+
+function inDndWindow() {
+  return dndUntil > Date.now();
+}
+
+function formatBadgeCount(n) {
+  if (!n || n < 1) return '';
+  if (n > 99) return '99+';
+  return String(n);
 }
 
 function buildSidebar() {
@@ -48,22 +67,45 @@ function buildSidebar() {
     btn.className = 'service-icon';
     btn.title = svc.name;
     btn.dataset.id = svc.id;
-
-    // Notification badge + icon
     btn.innerHTML = `<span class="svc-emoji">${svc.icon}</span><span class="notif-dot"></span>`;
     btn.addEventListener('click', () => showService(svc.id));
-
-    // Right-click toggles tracked service
     btn.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      if (e.shiftKey) {
-        cycleNotifyMode(svc.id);
-      } else {
-        toggleNotifyService(svc.id);
-      }
+      if (e.shiftKey) cycleNotifyMode(svc.id);
+      else toggleNotifyService(svc.id);
     });
-
     c.appendChild(btn);
+  });
+}
+
+function updateNotifyIndicators() {
+  SERVICES.forEach(svc => {
+    const btn = document.querySelector(`.service-icon[data-id="${svc.id}"]`);
+    if (!btn) return;
+    const dot = btn.querySelector('.notif-dot');
+    const tracked = notifyServices.includes(svc.id);
+    const mode = notifyModes[svc.id] || (tracked ? 'full' : 'off');
+    const count = unreadCounts[svc.id] || 0;
+
+    btn.classList.toggle('notify-tracked', tracked);
+    btn.classList.toggle('has-unread', tracked && count > 0);
+    btn.classList.toggle('mode-badge', mode === 'badge');
+    btn.classList.toggle('mode-off', mode === 'off');
+
+    if (!dot) return;
+    if (tracked && count > 0) dot.textContent = formatBadgeCount(count);
+    else dot.textContent = '';
+    btn.title = tracked ? `${svc.name} (${mode})` : `${svc.name} (off)`;
+  });
+}
+
+function syncNotifyServicesToRust() {
+  if (!window.__TAURI__) return;
+  SERVICES.forEach(svc => {
+    window.__TAURI__.core.invoke('set_notify_service', {
+      serviceId: svc.id,
+      enabled: notifyServices.includes(svc.id),
+    }).catch(() => {});
   });
 }
 
@@ -79,62 +121,34 @@ function toggleNotifyService(id) {
   }
   saveState();
   updateNotifyIndicators();
+  syncNotifyServicesToRust();
+}
 
-  // Sync to Rust
-  if (window.__TAURI__) {
-    window.__TAURI__.core.invoke('set_notify_service', {
-      serviceId: id,
-      enabled: notifyServices.includes(id),
-    }).catch(() => {});
+function cycleNotifyMode(id) {
+  const current = notifyModes[id] || 'off';
+  const next = current === 'off' ? 'badge' : current === 'badge' ? 'full' : 'off';
+  notifyModes[id] = next;
+  if (next === 'off') {
+    notifyServices = notifyServices.filter(s => s !== id);
+    unreadCounts[id] = 0;
+  } else if (!notifyServices.includes(id)) {
+    notifyServices.push(id);
   }
-}
-
-function formatBadgeCount(n) {
-  if (!n || n < 1) return '';
-  if (n > 99) return '99+';
-  return String(n);
-}
-
-function updateNotifyIndicators() {
-  SERVICES.forEach(svc => {
-    const btn = document.querySelector(`.service-icon[data-id="${svc.id}"]`);
-    if (!btn) return;
-    const dot = btn.querySelector('.notif-dot');
-    const isTracked = notifyServices.includes(svc.id);
-    const count = unreadCounts[svc.id] || 0;
-    const mode = notifyModes[svc.id] || (isTracked ? 'full' : 'off');
-
-    btn.classList.toggle('notify-tracked', isTracked);
-    btn.classList.toggle('has-unread', isTracked && count > 0);
-    btn.classList.toggle('mode-badge', mode === 'badge');
-    btn.classList.toggle('mode-off', mode === 'off');
-
-    if (!dot) return;
-    if (isTracked && count > 0) {
-      dot.textContent = formatBadgeCount(count);
-      btn.title = `${svc.name} — ${count} unread DM${count === 1 ? '' : 's'} (${mode})`;
-    } else {
-      dot.textContent = '';
-      btn.title = isTracked ? `${svc.name} (${mode})` : `${svc.name} (off)`;
-    }
-  });
-}
-
-function inDndWindow() {
-  return dndUntil > Date.now();
+  saveState();
+  updateNotifyIndicators();
+  syncNotifyServicesToRust();
 }
 
 function maybeNotify(serviceId, count) {
-  if (!('Notification' in window)) return;
   const mode = notifyModes[serviceId] || 'off';
   if (mode !== 'full' || inDndWindow()) return;
-  const service = SERVICES.find(s => s.id === serviceId);
-  const title = service ? service.name : serviceId;
+  if (!('Notification' in window)) return;
+  const svc = SERVICES.find(s => s.id === serviceId);
+  const title = svc ? svc.name : serviceId;
   if (Notification.permission === 'granted') {
     try {
       new Notification(`Tabburrito: ${title}`, {
         body: `${count} unread direct message${count === 1 ? '' : 's'}`,
-        silent: false,
       });
     } catch {}
   } else if (Notification.permission !== 'denied') {
@@ -151,38 +165,42 @@ function setUnreadCount(serviceId, count) {
   updateNotifyIndicators();
 }
 
-async function showService(id) {
-  document.querySelectorAll('.service-icon').forEach(el => el.classList.remove('active'));
-  document.querySelector(`.service-icon[data-id="${id}"]`)?.classList.add('active');
-  activeService = id;
-  saveState();
-  window.dispatchEvent(new CustomEvent('tabburrito:active-service', { detail: { id } }));
-
-  if (window.__TAURI__) {
-    try {
-      await window.__TAURI__.core.invoke('show_service', { label: id });
-    } catch (err) {
-      document.title = 'ERR: ' + err;
-    }
-  }
-}
-
 function updateMemoryButton() {
   const btn = document.getElementById('btn-memory');
   if (!btn) return;
   btn.classList.add('memory');
-  const mins = Math.round(unloadSeconds / 60);
-  btn.title = `Unload after: ${mins}m (click to cycle 1m/3m/10m)`;
+  btn.title = `Unload after: ${Math.round(unloadSeconds / 60)}m (click to cycle 1m/3m/10m)`;
 }
 
 async function cycleMemoryPreset() {
   const idx = UNLOAD_PRESETS.findIndex(v => v === unloadSeconds);
-  const next = UNLOAD_PRESETS[(idx + 1) % UNLOAD_PRESETS.length];
-  unloadSeconds = next;
+  unloadSeconds = UNLOAD_PRESETS[(idx + 1) % UNLOAD_PRESETS.length];
   saveState();
   updateMemoryButton();
   if (window.__TAURI__) {
     await window.__TAURI__.core.invoke('set_unload_seconds', { seconds: unloadSeconds }).catch(() => {});
+  }
+}
+
+function applyResourceMode(mode) {
+  resourceMode = mode;
+  if (mode === 'lean') {
+    unloadSeconds = 60;
+    notifyModes = Object.fromEntries(SERVICES.map(s => [s.id, s.id === 'whatsapp' || s.id === 'messenger' ? 'badge' : 'off']));
+  } else if (mode === 'instant') {
+    unloadSeconds = 600;
+    notifyModes = Object.fromEntries(SERVICES.map(s => [s.id, s.id === 'whatsapp' || s.id === 'messenger' ? 'full' : 'badge']));
+  } else {
+    unloadSeconds = 180;
+    notifyModes = Object.fromEntries(SERVICES.map(s => [s.id, s.id === 'whatsapp' || s.id === 'messenger' ? 'full' : 'off']));
+  }
+  notifyServices = SERVICES.filter(s => (notifyModes[s.id] || 'off') !== 'off').map(s => s.id);
+  saveState();
+  updateMemoryButton();
+  updateNotifyIndicators();
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('set_unload_seconds', { seconds: unloadSeconds }).catch(() => {});
+    syncNotifyServicesToRust();
   }
 }
 
@@ -209,39 +227,93 @@ function cycleDnd() {
   updateDndButton();
 }
 
-function cycleNotifyMode(id) {
-  const current = notifyModes[id] || 'off';
-  const next = current === 'off' ? 'badge' : current === 'badge' ? 'full' : 'off';
-  notifyModes[id] = next;
-  if (next === 'off') {
-    notifyServices = notifyServices.filter(s => s !== id);
-    unreadCounts[id] = 0;
-  } else if (!notifyServices.includes(id)) {
-    notifyServices.push(id);
+async function saveProfile(name) {
+  const profile = {
+    sidebarState: { muted: isMuted, dark: isDark, active: activeService, notifyServices, notifyModes, unloadSeconds, dndUntil, resourceMode },
+    portablePayload: null,
+  };
+  if (window.__TAURI__) {
+    profile.portablePayload = await window.__TAURI__.core.invoke('backup_portable_state').catch(() => null);
+  }
+  profiles[name] = profile;
+  saveState();
+}
+
+async function applyProfile(name) {
+  const profile = profiles[name];
+  if (!profile) return;
+  const s = profile.sidebarState || {};
+  isMuted = !!s.muted;
+  isDark = s.dark !== undefined ? !!s.dark : isDark;
+  activeService = s.active || activeService;
+  notifyServices = Array.isArray(s.notifyServices) ? s.notifyServices : notifyServices;
+  notifyModes = s.notifyModes || notifyModes;
+  unloadSeconds = Number(s.unloadSeconds) || unloadSeconds;
+  dndUntil = Number(s.dndUntil) || 0;
+  resourceMode = s.resourceMode || resourceMode;
+  if (profile.portablePayload && window.__TAURI__) {
+    await window.__TAURI__.core.invoke('restore_portable_state', { payload: profile.portablePayload }).catch(() => {});
   }
   saveState();
+  document.body.classList.toggle('dark', isDark);
+  document.body.classList.toggle('light', !isDark);
+  updateMemoryButton();
+  updateDndButton();
   updateNotifyIndicators();
+  syncNotifyServicesToRust();
   if (window.__TAURI__) {
-    window.__TAURI__.core.invoke('set_notify_service', {
-      serviceId: id,
-      enabled: next !== 'off',
-    }).catch(() => {});
+    await window.__TAURI__.core.invoke('set_muted', { muted: isMuted }).catch(() => {});
+    await window.__TAURI__.core.invoke('set_unload_seconds', { seconds: unloadSeconds }).catch(() => {});
+  }
+  if (activeService) await showService(activeService);
+}
+
+async function exportPortableBackup() {
+  if (!window.__TAURI__) return;
+  const payload = await window.__TAURI__.core.invoke('backup_portable_state').catch(() => null);
+  if (!payload) return;
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `tabburrito-backup-${Date.now()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function restorePortableBackup() {
+  if (!window.__TAURI__) return;
+  const payload = window.prompt('Paste portable backup JSON');
+  if (!payload) return;
+  await window.__TAURI__.core.invoke('restore_portable_state', { payload }).catch(() => {});
+}
+
+async function showService(id) {
+  document.querySelectorAll('.service-icon').forEach(el => el.classList.remove('active'));
+  document.querySelector(`.service-icon[data-id="${id}"]`)?.classList.add('active');
+  activeService = id;
+  saveState();
+  window.dispatchEvent(new CustomEvent('tabburrito:active-service', { detail: { id } }));
+  if (window.__TAURI__) {
+    try {
+      await window.__TAURI__.core.invoke('show_service', { label: id });
+    } catch (err) {
+      document.title = 'ERR: ' + err;
+    }
   }
 }
 
 async function refreshCurrent() {
   if (!activeService || !window.__TAURI__) return;
-  try {
-    await window.__TAURI__.core.invoke('refresh_service', { label: activeService });
-  } catch {}
+  await window.__TAURI__.core.invoke('refresh_service', { label: activeService }).catch(() => {});
 }
 
 function toggleMute() {
   isMuted = !isMuted;
   document.getElementById('btn-mute').classList.toggle('muted', isMuted);
-  document.getElementById('mute-waves').setAttribute('d', isMuted
-    ? 'M23 9l-6 6M17 9l6 6'
-    : 'M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.08');
+  document.getElementById('mute-waves').setAttribute('d', isMuted ? 'M23 9l-6 6M17 9l6 6' : 'M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.08');
   saveState();
   if (window.__TAURI__) {
     window.__TAURI__.core.invoke('set_muted', { muted: isMuted }).catch(() => {});
@@ -279,17 +351,6 @@ async function initAutostart() {
   } catch {}
 }
 
-function syncNotifyServicesToRust() {
-  if (!window.__TAURI__) return;
-  // Reset then enable currently tracked services
-  SERVICES.forEach(svc => {
-    window.__TAURI__.core.invoke('set_notify_service', {
-      serviceId: svc.id,
-      enabled: notifyServices.includes(svc.id),
-    }).catch(() => {});
-  });
-}
-
 async function initUnreadListener() {
   if (!window.__TAURI__?.event?.listen) return;
   try {
@@ -312,29 +373,25 @@ async function initUnreadListener() {
   } catch {}
 }
 
-document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.key >= '1' && e.key <= '5') {
-    e.preventDefault();
-    if (SERVICES[+e.key - 1]) showService(SERVICES[+e.key - 1].id);
-  }
-  if (e.ctrlKey && e.key === 'm') { e.preventDefault(); toggleMute(); }
-  if (e.ctrlKey && e.key === 'd') { e.preventDefault(); toggleDark(); }
-  if (e.ctrlKey && e.key === 'r') { e.preventDefault(); refreshCurrent(); }
-  if (e.ctrlKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openPalette(); }
-  if (e.key === 'Escape') closePalette();
-});
-
 function paletteCommands() {
-  const svcCmds = SERVICES.map(s => ({
-    label: `Switch: ${s.name}`,
-    run: () => showService(s.id),
-  }));
+  const svcCmds = SERVICES.map(s => ({ label: `Switch: ${s.name}`, run: () => showService(s.id) }));
   return [
     ...svcCmds,
     { label: 'Toggle mute', run: toggleMute },
     { label: 'Refresh current', run: refreshCurrent },
     { label: 'Cycle memory preset', run: cycleMemoryPreset },
     { label: 'Cycle DND', run: cycleDnd },
+    { label: 'Mode: Lean', run: () => applyResourceMode('lean') },
+    { label: 'Mode: Balanced', run: () => applyResourceMode('balanced') },
+    { label: 'Mode: Instant', run: () => applyResourceMode('instant') },
+    { label: 'Profile: Save Work', run: () => saveProfile('work') },
+    { label: 'Profile: Save Personal', run: () => saveProfile('personal') },
+    { label: 'Profile: Save Focus', run: () => saveProfile('focus') },
+    { label: 'Profile: Apply Work', run: () => applyProfile('work') },
+    { label: 'Profile: Apply Personal', run: () => applyProfile('personal') },
+    { label: 'Profile: Apply Focus', run: () => applyProfile('focus') },
+    { label: 'Backup: Export portable state', run: exportPortableBackup },
+    { label: 'Backup: Restore portable state', run: restorePortableBackup },
   ];
 }
 
@@ -343,12 +400,12 @@ function renderPalette(filter = '') {
   const q = filter.trim().toLowerCase();
   const items = paletteCommands().filter(c => c.label.toLowerCase().includes(q));
   list.innerHTML = '';
-  items.forEach((cmd, idx) => {
+  items.forEach((cmd) => {
     const row = document.createElement('div');
-    row.className = 'palette-item' + (idx === 0 ? ' active' : '');
+    row.className = 'palette-item';
     row.textContent = cmd.label;
-    row.addEventListener('click', () => {
-      cmd.run();
+    row.addEventListener('click', async () => {
+      await cmd.run();
       closePalette();
     });
     list.appendChild(row);
@@ -365,15 +422,25 @@ function openPalette() {
 }
 
 function closePalette() {
-  const p = document.getElementById('command-palette');
-  p.classList.add('hidden');
+  document.getElementById('command-palette').classList.add('hidden');
 }
+
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key >= '1' && e.key <= '5') {
+    e.preventDefault();
+    if (SERVICES[+e.key - 1]) showService(SERVICES[+e.key - 1].id);
+  }
+  if (e.ctrlKey && e.key.toLowerCase() === 'm') { e.preventDefault(); toggleMute(); }
+  if (e.ctrlKey && e.key.toLowerCase() === 'd') { e.preventDefault(); toggleDark(); }
+  if (e.ctrlKey && e.key.toLowerCase() === 'r') { e.preventDefault(); refreshCurrent(); }
+  if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+  if (e.key === 'Escape') closePalette();
+});
 
 function init() {
   loadState();
   buildSidebar();
   updateNotifyIndicators();
-
   document.body.classList.toggle('dark', isDark);
   document.body.classList.toggle('light', !isDark);
   if (isMuted) {
@@ -394,23 +461,16 @@ function init() {
   initUnreadListener();
   syncNotifyServicesToRust();
 
-  // Apply persisted mute to WebView2 as soon as possible
   if (window.__TAURI__) {
     window.__TAURI__.core.invoke('set_muted', { muted: isMuted }).catch(() => {});
     window.__TAURI__.core.invoke('set_unload_seconds', { seconds: unloadSeconds }).catch(() => {});
   }
   setInterval(updateDndButton, 30_000);
 
-  // Restore last service — wait for window maximize to complete
-  // then show the service, which triggers proper webview sizing
   const target = activeService || SERVICES[0].id;
-  function tryShow() {
-    showService(target);
-  }
-  // Stagger: try at 500ms, 1s, 2s to handle slow startups
-  setTimeout(tryShow, 500);
-  setTimeout(tryShow, 1000);
-  setTimeout(tryShow, 2000);
+  setTimeout(() => showService(target), 500);
+  setTimeout(() => showService(target), 1000);
+  setTimeout(() => showService(target), 2000);
 }
 
 init();

@@ -930,6 +930,14 @@ impl NotifyState {
         map.insert(service_id.to_string(), count);
         prev != count
     }
+
+    fn tracked_snapshot(&self) -> HashMap<String, bool> {
+        self.tracked.lock().unwrap().clone()
+    }
+
+    fn replace_tracked(&self, tracked: HashMap<String, bool>) {
+        *self.tracked.lock().unwrap() = tracked;
+    }
 }
 
 struct AppPrefsState {
@@ -974,6 +982,14 @@ impl ServiceUrlState {
     fn get_url(&self, service_id: &str) -> Option<String> {
         self.urls.lock().unwrap().get(service_id).cloned()
     }
+
+    fn snapshot(&self) -> HashMap<String, String> {
+        self.urls.lock().unwrap().clone()
+    }
+
+    fn replace(&self, urls: HashMap<String, String>) {
+        *self.urls.lock().unwrap() = urls;
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -987,6 +1003,15 @@ struct UnreadPayload {
 #[serde(rename_all = "camelCase")]
 struct ActiveServicePayload {
     service_id: String,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableStatePayload {
+    unload_seconds: u64,
+    service_urls: HashMap<String, String>,
+    linkedin_sort: String,
+    notify_tracked: HashMap<String, bool>,
 }
 
 fn parse_tb_unread_marker(title: &str) -> Option<u32> {
@@ -1696,6 +1721,33 @@ async fn set_service_url(app: tauri::AppHandle, service_id: String, url: String)
 }
 
 #[tauri::command]
+async fn backup_portable_state(app: tauri::AppHandle) -> Result<String, String> {
+    let payload = PortableStatePayload {
+        unload_seconds: app.state::<AppPrefsState>().get_unload_secs(),
+        service_urls: app.state::<ServiceUrlState>().snapshot(),
+        linkedin_sort: app.state::<LinkedInSortState>().get(),
+        notify_tracked: app.state::<NotifyState>().tracked_snapshot(),
+    };
+    serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn restore_portable_state(app: tauri::AppHandle, payload: String) -> Result<(), String> {
+    let parsed: PortableStatePayload = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
+    app.state::<AppPrefsState>().set_unload_secs(parsed.unload_seconds);
+    app.state::<ServiceUrlState>().replace(parsed.service_urls);
+    app.state::<LinkedInSortState>().set(&parsed.linkedin_sort);
+    app.state::<NotifyState>().replace_tracked(parsed.notify_tracked.clone());
+    for (service_id, enabled) in parsed.notify_tracked {
+        if !enabled {
+            emit_unread(&app, &service_id, 0);
+        }
+    }
+    apply_linkedin_sort_to_webview(&app);
+    Ok(())
+}
+
+#[tauri::command]
 async fn set_notify_service(
     app: tauri::AppHandle,
     service_id: String,
@@ -1773,6 +1825,8 @@ fn main() {
             set_linkedin_feed_sort,
             set_unload_seconds,
             set_service_url,
+            backup_portable_state,
+            restore_portable_state,
             set_notify_service,
             get_autostart_enabled,
             set_autostart_enabled,
