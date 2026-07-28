@@ -137,6 +137,11 @@ body.light .sidebar-btn:hover {
   opacity: 1;
 }
 
+.sidebar-btn.memory {
+  color: #f59e0b;
+  opacity: 1;
+}
+
 /* Notification tracking indicators */
 .service-icon {
   position: relative;
@@ -154,21 +159,37 @@ body.light .sidebar-btn:hover {
   height: 8px;
   border-radius: 50%;
   display: none;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  text-align: center;
+  min-width: 8px;
+  padding: 0;
+  pointer-events: none;
 }
 
 .service-icon.notify-tracked .notif-dot {
   display: block;
-  background: rgba(100, 100, 100, 0.3);
+  background: rgba(100, 100, 100, 0.35);
   width: 6px;
   height: 6px;
 }
 
 .service-icon.has-unread .notif-dot {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: #ef4444;
-  width: 8px;
-  height: 8px;
+  min-width: 16px;
+  width: auto;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 999px;
+  top: 0;
+  right: 0;
   animation: pulse 2s infinite;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
 }
 
 @keyframes pulse {

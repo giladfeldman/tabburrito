@@ -45,6 +45,15 @@
     #adblock-indicator { font-size: 10px; color: #22c55e; display: none; cursor: pointer; }
     #adblock-indicator.visible { display: inline; }
     #adblock-indicator.disabled { color: #666; }
+    #feed-sort-toggle {
+      font-size: 10px; color: #888; display: none; cursor: pointer;
+      padding: 2px 6px; border-radius: 4px; border: 1px solid #333;
+      user-select: none; white-space: nowrap;
+    }
+    #feed-sort-toggle.visible { display: inline; }
+    #feed-sort-toggle:hover { background: #2a2a4a; color: #ddd; }
+    #feed-sort-toggle.recent { color: #22c55e; border-color: #22c55e55; }
+    #feed-sort-toggle.top { color: #f59e0b; border-color: #f59e0b55; }
     .bar-btn.warn { color: #f97316; }
     .bar-btn.danger { color: #ef4444; }
   </style>
@@ -55,10 +64,13 @@
   <button class="bar-btn" id="btn-go" title="Navigate">&#x2192;</button>
   <button class="bar-btn" id="btn-open" title="Open Service">&#x25B6;</button>
   <button class="bar-btn warn" id="btn-reload" title="Reload Service">&#x21BB;</button>
+  <button class="bar-btn" id="btn-reset-url" title="Reset to default URL">&#x21BA;</button>
+  <button class="bar-btn" id="btn-restore-url" title="Restore last good URL">&#x2932;</button>
   <button class="bar-btn danger" id="btn-close" title="Close Service">&#x2715;</button>
   <button class="bar-btn" id="btn-zout" title="Zoom Out (Ctrl+-)">&#x2212;</button>
   <span id="zoom-label">100%</span>
   <button class="bar-btn" id="btn-zin" title="Zoom In (Ctrl+=)">+</button>
+  <span id="feed-sort-toggle" title="LinkedIn feed sort (click to toggle)">Recent</span>
   <span id="adblock-indicator" title="Click to toggle ad blocker">&#x1F6E1; AdBlock</span>
   <script src="urlbar.js"></script>
 </body>

@@ -1,4 +1,4 @@
-// Tabburrito URL bar — shows/edits URL, zoom controls, adblock indicator
+// Tabburrito URL bar — shows/edits URL, zoom controls, adblock indicator, LinkedIn feed sort
 
 const SERVICES = [
   { id: 'whatsapp', name: 'WhatsApp', url: 'https://web.whatsapp.com' },
@@ -7,11 +7,14 @@ const SERVICES = [
   { id: 'bluesky', name: 'Bluesky', url: 'https://bsky.app' },
   { id: 'calendar', name: 'Calendar', url: 'https://accounts.google.com/ServiceLogin?continue=https://calendar.google.com/calendar/u/0/r?hl%3Den&hl=en' },
 ];
+const DEFAULT_SERVICE_URLS = Object.fromEntries(SERVICES.map(s => [s.id, s.url]));
 
 let currentService = null;
 let zoomLevels = {}; // { serviceId: zoomPercent }
 let adblockByService = {}; // { serviceId: bool }
 let closedServices = {}; // { serviceId: bool }
+let linkedinFeedSort = 'recent'; // 'recent' | 'top'
+let lastGoodUrls = {}; // { serviceId: url }
 
 function loadState() {
   try {
@@ -19,6 +22,8 @@ function loadState() {
     zoomLevels = s.zoom || {};
     adblockByService = s.adblock || {};
     closedServices = s.closed || {};
+    lastGoodUrls = s.lastGoodUrls || {};
+    linkedinFeedSort = s.linkedinFeedSort === 'top' ? 'top' : 'recent';
     // Load custom URLs
     if (s.urls) {
       for (const svc of SERVICES) {
@@ -36,6 +41,8 @@ function saveState() {
     adblock: adblockByService,
     closed: closedServices,
     urls: urls,
+    linkedinFeedSort: linkedinFeedSort,
+    lastGoodUrls: lastGoodUrls,
   }));
 }
 
@@ -71,6 +78,31 @@ function setZoom(id, pct) {
   }
 }
 
+function updateFeedSortToggle() {
+  const el = document.getElementById('feed-sort-toggle');
+  if (!el) return;
+  const onLinkedIn = currentService === 'linkedin';
+  el.classList.toggle('visible', onLinkedIn);
+  el.classList.toggle('recent', linkedinFeedSort === 'recent');
+  el.classList.toggle('top', linkedinFeedSort === 'top');
+  el.textContent = linkedinFeedSort === 'recent' ? 'Sort: Recent' : 'Sort: Top';
+  el.title = 'LinkedIn feed sort — click to toggle Top/Recent';
+}
+
+function syncLinkedInFeedSort() {
+  if (!window.__TAURI__) return;
+  window.__TAURI__.core.invoke('set_linkedin_feed_sort', {
+    sort: linkedinFeedSort,
+  }).catch(() => {});
+}
+
+function toggleLinkedInFeedSort() {
+  linkedinFeedSort = linkedinFeedSort === 'recent' ? 'top' : 'recent';
+  saveState();
+  updateFeedSortToggle();
+  syncLinkedInFeedSort();
+}
+
 function updateForService(id) {
   currentService = id;
   const svc = SERVICES.find(s => s.id === id);
@@ -87,6 +119,8 @@ function updateForService(id) {
   ab.classList.toggle('disabled', !enabled);
   ab.textContent = enabled ? '\u{1F6E1} AdBlock On' : '\u{1F6E1} AdBlock Off';
 
+  updateFeedSortToggle();
+
   // Apply saved zoom
   const zoom = getZoom(id);
   if (zoom !== 100 && window.__TAURI__) {
@@ -96,7 +130,14 @@ function updateForService(id) {
   }
 }
 
-// Listen for service changes from sidebar via storage events
+// Sync active service from sidebar via custom event (same window) or storage (fallback)
+window.addEventListener('tabburrito:active-service', (e) => {
+  const id = e.detail?.id;
+  if (id && id !== currentService) {
+    updateForService(id);
+  }
+});
+
 window.addEventListener('storage', (e) => {
   if (e.key === 'tabburrito') {
     try {
@@ -108,25 +149,28 @@ window.addEventListener('storage', (e) => {
   }
 });
 
-// Also poll (storage events don't fire within same origin sometimes)
-setInterval(() => {
-  try {
-    const s = JSON.parse(localStorage.getItem('tabburrito') || '{}');
-    if (s.active && s.active !== currentService) {
-      updateForService(s.active);
-    }
-  } catch {}
-}, 500);
+async function pushServiceUrlToRust(id, url) {
+  if (!window.__TAURI__) return;
+  await window.__TAURI__.core.invoke('set_service_url', {
+    serviceId: id,
+    url: url,
+  }).catch(() => {});
+}
 
-// Navigate on Enter
+// Init
 document.getElementById('url-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && currentService) {
     let url = e.target.value.trim();
     if (!url.startsWith('http')) url = 'https://' + url;
     const svc = SERVICES.find(s => s.id === currentService);
-    if (svc) svc.url = url;
+    if (svc) {
+      const prev = svc.url;
+      if (prev && prev !== url) lastGoodUrls[currentService] = prev;
+      svc.url = url;
+    }
     saveState();
     if (window.__TAURI__) {
+      pushServiceUrlToRust(currentService, url);
       window.__TAURI__.core.invoke('navigate_service', {
         label: currentService, url: url,
       }).catch(() => {});
@@ -158,6 +202,11 @@ document.getElementById('adblock-indicator').addEventListener('click', () => {
   }
 });
 
+document.getElementById('feed-sort-toggle').addEventListener('click', () => {
+  if (currentService !== 'linkedin') return;
+  toggleLinkedInFeedSort();
+});
+
 function openServiceTab() {
   if (!currentService) return;
   const svc = SERVICES.find(s => s.id === currentService);
@@ -174,8 +223,12 @@ function openServiceTab() {
 
 function reloadServiceTab() {
   if (!currentService || !window.__TAURI__) return;
-  window.__TAURI__.core.invoke('reload_service', {
+  const svc = SERVICES.find(s => s.id === currentService);
+  if (!svc) return;
+  pushServiceUrlToRust(currentService, svc.url);
+  window.__TAURI__.core.invoke('navigate_service', {
     label: currentService,
+    url: svc.url,
   }).catch(() => {});
 }
 
@@ -192,6 +245,34 @@ function closeServiceTab() {
 document.getElementById('btn-open').addEventListener('click', openServiceTab);
 document.getElementById('btn-reload').addEventListener('click', reloadServiceTab);
 document.getElementById('btn-close').addEventListener('click', closeServiceTab);
+document.getElementById('btn-reset-url').addEventListener('click', () => {
+  if (!currentService) return;
+  const svc = SERVICES.find(s => s.id === currentService);
+  const def = DEFAULT_SERVICE_URLS[currentService];
+  if (!svc || !def) return;
+  const prev = svc.url;
+  if (prev && prev !== def) lastGoodUrls[currentService] = prev;
+  svc.url = def;
+  document.getElementById('url-input').value = def;
+  saveState();
+  pushServiceUrlToRust(currentService, def);
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('navigate_service', { label: currentService, url: def }).catch(() => {});
+  }
+});
+document.getElementById('btn-restore-url').addEventListener('click', () => {
+  if (!currentService) return;
+  const svc = SERVICES.find(s => s.id === currentService);
+  const restored = lastGoodUrls[currentService];
+  if (!svc || !restored) return;
+  svc.url = restored;
+  document.getElementById('url-input').value = restored;
+  saveState();
+  pushServiceUrlToRust(currentService, restored);
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('navigate_service', { label: currentService, url: restored }).catch(() => {});
+  }
+});
 
 // Init
 loadState();
@@ -202,7 +283,7 @@ try {
   updateForService('whatsapp');
 }
 
-// Sync adblock defaults to Rust at startup.
+// Sync adblock defaults + LinkedIn sort to Rust at startup.
 if (window.__TAURI__) {
   SERVICES.forEach(svc => {
     const enabled = getAdblock(svc.id);
@@ -211,4 +292,16 @@ if (window.__TAURI__) {
       enabled: enabled,
     }).catch(() => {});
   });
+  syncLinkedInFeedSort();
+  SERVICES.forEach(svc => {
+    pushServiceUrlToRust(svc.id, svc.url);
+  });
+  if (window.__TAURI__?.event?.listen) {
+    window.__TAURI__.event.listen('tb-active-service', (event) => {
+      const payload = event.payload || {};
+      const id = payload.serviceId || payload.service_id;
+      if (!id || id === currentService) return;
+      updateForService(id);
+    }).catch(() => {});
+  }
 }

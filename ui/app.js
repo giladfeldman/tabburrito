@@ -12,7 +12,9 @@ let activeService = null;
 let isMuted = false;
 let isDark = true;
 let notifyServices = ['whatsapp', 'messenger']; // default
-let lastNotifState = false;
+let unreadCounts = {}; // { serviceId: number }
+let unloadSeconds = 180;
+const UNLOAD_PRESETS = [60, 180, 600];
 
 function loadState() {
   try {
@@ -21,6 +23,7 @@ function loadState() {
     isDark = s.dark !== undefined ? s.dark : true;
     activeService = s.active || null;
     if (s.notifyServices) notifyServices = s.notifyServices;
+    unloadSeconds = Number(s.unloadSeconds) || 180;
   } catch {}
 }
 
@@ -28,6 +31,7 @@ function saveState() {
   localStorage.setItem('tabburrito', JSON.stringify({
     muted: isMuted, dark: isDark, active: activeService,
     notifyServices: notifyServices,
+    unloadSeconds: unloadSeconds,
   }));
 }
 
@@ -39,7 +43,7 @@ function buildSidebar() {
     btn.title = svc.name;
     btn.dataset.id = svc.id;
 
-    // Notification dot + icon
+    // Notification badge + icon
     btn.innerHTML = `<span class="svc-emoji">${svc.icon}</span><span class="notif-dot"></span>`;
     btn.addEventListener('click', () => showService(svc.id));
 
@@ -57,6 +61,7 @@ function toggleNotifyService(id) {
   const idx = notifyServices.indexOf(id);
   if (idx >= 0) {
     notifyServices.splice(idx, 1);
+    unreadCounts[id] = 0;
   } else {
     notifyServices.push(id);
   }
@@ -72,38 +77,39 @@ function toggleNotifyService(id) {
   }
 }
 
+function formatBadgeCount(n) {
+  if (!n || n < 1) return '';
+  if (n > 99) return '99+';
+  return String(n);
+}
+
 function updateNotifyIndicators() {
   SERVICES.forEach(svc => {
     const btn = document.querySelector(`.service-icon[data-id="${svc.id}"]`);
     if (!btn) return;
     const dot = btn.querySelector('.notif-dot');
     const isTracked = notifyServices.includes(svc.id);
+    const count = unreadCounts[svc.id] || 0;
 
-    // Show a subtle ring on tracked services
     btn.classList.toggle('notify-tracked', isTracked);
+    btn.classList.toggle('has-unread', isTracked && count > 0);
 
-    // The dot itself is shown when there's an unread count
-    // We'll update this in the polling function
+    if (!dot) return;
+    if (isTracked && count > 0) {
+      dot.textContent = formatBadgeCount(count);
+      btn.title = `${svc.name} — ${count} unread DM${count === 1 ? '' : 's'}`;
+    } else {
+      dot.textContent = '';
+      btn.title = isTracked ? `${svc.name} (notify on)` : svc.name;
+    }
   });
 }
 
-// Poll service webview titles to detect notification counts
-// WhatsApp: "(3) WhatsApp" / Messenger: "Messenger (2)"
-async function pollNotifications() {
-  if (!window.__TAURI__) return;
-
-  let anyNotif = false;
-
-  for (const svcId of notifyServices) {
-    // We can't read child webview titles directly from the sidebar webview.
-    // Instead, inject JS into each tracked service webview to check document.title
-    // For now, we use a simpler approach: check via the Rust side
-    // The title change detection happens via page_title observers in WebView2
-  }
-
-  // For MVP: the sidebar JS can't directly inspect other webview titles.
-  // The notification polling needs to happen from Rust. For now, mark the
-  // architecture as ready and we'll wire the Rust-side title watching later.
+function setUnreadCount(serviceId, count) {
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  if (unreadCounts[serviceId] === n) return;
+  unreadCounts[serviceId] = n;
+  updateNotifyIndicators();
 }
 
 async function showService(id) {
@@ -111,6 +117,7 @@ async function showService(id) {
   document.querySelector(`.service-icon[data-id="${id}"]`)?.classList.add('active');
   activeService = id;
   saveState();
+  window.dispatchEvent(new CustomEvent('tabburrito:active-service', { detail: { id } }));
 
   if (window.__TAURI__) {
     try {
@@ -118,6 +125,25 @@ async function showService(id) {
     } catch (err) {
       document.title = 'ERR: ' + err;
     }
+  }
+}
+
+function updateMemoryButton() {
+  const btn = document.getElementById('btn-memory');
+  if (!btn) return;
+  btn.classList.add('memory');
+  const mins = Math.round(unloadSeconds / 60);
+  btn.title = `Unload after: ${mins}m (click to cycle 1m/3m/10m)`;
+}
+
+async function cycleMemoryPreset() {
+  const idx = UNLOAD_PRESETS.findIndex(v => v === unloadSeconds);
+  const next = UNLOAD_PRESETS[(idx + 1) % UNLOAD_PRESETS.length];
+  unloadSeconds = next;
+  saveState();
+  updateMemoryButton();
+  if (window.__TAURI__) {
+    await window.__TAURI__.core.invoke('set_unload_seconds', { seconds: unloadSeconds }).catch(() => {});
   }
 }
 
@@ -135,6 +161,9 @@ function toggleMute() {
     ? 'M23 9l-6 6M17 9l6 6'
     : 'M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.08');
   saveState();
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('set_muted', { muted: isMuted }).catch(() => {});
+  }
 }
 window.__tabburrito_toggleMute = toggleMute;
 
@@ -168,6 +197,39 @@ async function initAutostart() {
   } catch {}
 }
 
+function syncNotifyServicesToRust() {
+  if (!window.__TAURI__) return;
+  // Reset then enable currently tracked services
+  SERVICES.forEach(svc => {
+    window.__TAURI__.core.invoke('set_notify_service', {
+      serviceId: svc.id,
+      enabled: notifyServices.includes(svc.id),
+    }).catch(() => {});
+  });
+}
+
+async function initUnreadListener() {
+  if (!window.__TAURI__?.event?.listen) return;
+  try {
+    await window.__TAURI__.event.listen('tb-unread', (event) => {
+      const payload = event.payload || {};
+      const id = payload.serviceId || payload.service_id;
+      if (!id) return;
+      setUnreadCount(id, payload.count);
+    });
+    await window.__TAURI__.event.listen('tb-active-service', (event) => {
+      const payload = event.payload || {};
+      const id = payload.serviceId || payload.service_id;
+      if (!id) return;
+      activeService = id;
+      document.querySelectorAll('.service-icon').forEach(el => el.classList.remove('active'));
+      document.querySelector(`.service-icon[data-id="${id}"]`)?.classList.add('active');
+      window.dispatchEvent(new CustomEvent('tabburrito:active-service', { detail: { id } }));
+      saveState();
+    });
+  } catch {}
+}
+
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
@@ -193,8 +255,18 @@ function init() {
   document.getElementById('btn-dark').addEventListener('click', toggleDark);
   document.getElementById('btn-refresh').addEventListener('click', refreshCurrent);
   document.getElementById('btn-autostart').addEventListener('click', toggleAutostart);
+  document.getElementById('btn-memory').addEventListener('click', cycleMemoryPreset);
 
+  updateMemoryButton();
   initAutostart();
+  initUnreadListener();
+  syncNotifyServicesToRust();
+
+  // Apply persisted mute to WebView2 as soon as possible
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('set_muted', { muted: isMuted }).catch(() => {});
+    window.__TAURI__.core.invoke('set_unload_seconds', { seconds: unloadSeconds }).catch(() => {});
+  }
 
   // Restore last service — wait for window maximize to complete
   // then show the service, which triggers proper webview sizing
