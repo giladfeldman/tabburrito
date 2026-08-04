@@ -40,3 +40,49 @@ TabburritoFirefox/
 
 # Archive (old/test files)
 archive/
+
+# ---------------------------------------------------------------------------
+# Sensitive / personal data - NEVER commit (this is a public repo)
+# ---------------------------------------------------------------------------
+
+# Local machine recovery output: Dropbox file inventories (full personal file
+# listings), Codex AI session rollouts, and Codex global state. The rollout
+# transcripts were verified on 2026-08-04 to contain live `sk-` API tokens.
+recovery-manifests/
+
+# AI assistant state/config anywhere in the tree - these carry auth tokens,
+# session transcripts, and machine-specific paths.
+.codex/
+.codex-global-state.json*
+**/rollouts/
+*.rollout.jsonl
+
+# Credential-bearing files
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+client_secret*.json
+token.json
+*_token.json
+.env.*
+!.env.example
+
+# Session/profile stores (login cookies, saved passwords)
+**/EBWebView/
+**/Local Storage/
+Cookies
+Cookies-journal
+"Login Data"
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local session backups produced by install/Backup-TabburritoSessions.ps1
+Backups/
+TabburritoSessions_*.zip
+
+# Python cache
+__pycache__/
+*.pyc

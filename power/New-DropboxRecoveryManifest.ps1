@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$DropboxRoot = 'C:\Users\filin\Dropbox',
+    [string]$DropboxRoot = (Join-Path $HOME 'Dropbox'),
     [datetime]$Cutoff = [datetime]'2026-07-30T08:33:51',
     [string]$OutputDirectory = $null
 )
