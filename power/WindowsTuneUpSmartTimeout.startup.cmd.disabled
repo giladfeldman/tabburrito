@@ -1,0 +1,3 @@
+@echo off
+start "" "C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%USERPROFILE%\Vibe\WindowsTuneUp\power\SmartTimeout.ps1" -AcIdleMinutes 0 -BatteryIdleMinutes 30 -WorkGraceMinutes 45 -PollSeconds 60
+
