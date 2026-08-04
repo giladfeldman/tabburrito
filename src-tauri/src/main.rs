@@ -1763,10 +1763,12 @@ async fn set_notify_service(
             create_service_webview(&app, svc)?;
             if let Some(wv) = app.get_webview(svc.id) {
                 if !app.state::<WebviewState>().is_loaded(svc.id) {
-                    let url: url::Url = svc
-                        .url
-                        .parse()
-                        .map_err(|e: url::ParseError| e.to_string())?;
+                    // Go through resolve_service_url like every other
+                    // navigation site: parsing svc.url directly ignores a
+                    // saved per-service override, so enabling notifications
+                    // silently reloaded the service at its default URL and
+                    // discarded the user's selection (R-0062).
+                    let url = resolve_service_url(&app, svc)?;
                     wv.navigate(url).map_err(|e| e.to_string())?;
                     app.state::<WebviewState>().set_loaded(svc.id, true);
                 }
