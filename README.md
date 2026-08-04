@@ -19,15 +19,25 @@ Source:
 - `src-tauri/`
 - `ui/`
 
-Release exe:
+Installed exe:
 
-- `build\cargo-target-webview2\release\tabburrito.exe`
+- `%LOCALAPPDATA%\Programs\Tabburrito\tabburrito.exe`
 
 Runtime data:
 
-- `TabburritoWebViewData\main\` next to the running exe
+- `%LOCALAPPDATA%\Tabburrito\TabburritoWebViewData\main\`
 
-That means a portable copy can carry its own sessions, cookies, local storage, and cache with it. Replacing the exe should not force re-login as long as the sibling `TabburritoWebViewData` folder is kept.
+Program and user data are deliberately kept apart, so updating or reinstalling never
+touches your sessions. See [`install/README.md`](install/README.md) for install,
+auto-update, backup, and uninstall.
+
+> **Never put the exe (or its data) inside a build output directory.** Sessions used to
+> live next to an exe in `build\cargo-target-webview2\release\`; a build-cache cleanup
+> deleted the whole directory on 2026-08-04 and every login was lost with no possible
+> recovery. See `lessons.md`.
+
+Portable mode (data beside the exe, for USB sticks) is opt-in: create an empty
+`portable.txt` next to the exe. Only use it for an exe in a stable folder.
 
 ### Alternate: Firefox Lite
 
@@ -76,14 +86,23 @@ Build both maintained tracks:
 
 Build outputs are intentionally ignored by git and live under `build\`.
 
-## Portable Runtime Rules
+## Runtime Data Rules
 
-Tabburrito is designed so project/runtime data is local to the portable folder:
+**User data must never live inside a build output directory.** Anything under a cargo
+target dir is disposable by definition and can be deleted by any tool at any time.
 
-- Rust toolchain/cache wrappers live under `build\`
-- WebView2 data lives next to `tabburrito.exe` under `TabburritoWebViewData\`
+- WebView2 sessions: `%LOCALAPPDATA%\Tabburrito\TabburritoWebViewData\`
+- Session backups: `%LOCALAPPDATA%\Tabburrito\Backups\`
+- Build output: `%LOCALAPPDATA%\TabburritoBuild\` (outside the repo, safe to delete)
+- Rust toolchain/cache wrappers for the legacy portable build: `build\`
 - Firefox Lite data lives next to `tabburrito-lite.exe` under `TabburritoLite\`
 - packaged Firefox runtime lives under `TabburritoFirefox\`
+
+Back up sessions before any risky operation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install\Backup-TabburritoSessions.ps1
+```
 
 Do not commit runtime profiles, cookies, session stores, build outputs, or personal data.
 

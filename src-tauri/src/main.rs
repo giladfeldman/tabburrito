@@ -34,12 +34,83 @@ fn exe_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
+/// Root folder holding all Tabburrito user data (WebView2 profiles, sessions, prefs).
+///
+/// Installed mode (default): `%LOCALAPPDATA%\Tabburrito\TabburritoWebViewData`.
+/// User data MUST NOT live next to the exe by default. It previously did, and
+/// because the release exe sat inside `build\cargo-target-webview2\release\`,
+/// a routine cargo/target cleanup destroyed every logged-in session (2026-08-04).
+/// Keeping data under LOCALAPPDATA makes that class of loss structurally impossible
+/// and lets the installer replace the exe without touching sessions.
+///
+/// Portable mode (opt-in): create a file named `portable.txt` next to the exe.
+/// Data then lives in `<exe-dir>\TabburritoWebViewData` for USB-stick use. Only do
+/// this when the exe is in a stable folder that no build system will ever clean.
+fn data_root() -> std::path::PathBuf {
+    if exe_dir().join("portable.txt").exists() {
+        return exe_dir().join("TabburritoWebViewData");
+    }
+
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(exe_dir)
+        .join("Tabburrito")
+        .join("TabburritoWebViewData")
+}
+
+/// Move pre-2026-08-04 exe-adjacent session data into the installed location, once.
+///
+/// Only runs when the new root does not yet exist, so it can never clobber live
+/// sessions. Best-effort: a failure here costs a re-login, never data already in place.
+fn migrate_legacy_data_dir() {
+    if exe_dir().join("portable.txt").exists() {
+        return;
+    }
+
+    let legacy = exe_dir().join("TabburritoWebViewData");
+    let target = data_root();
+
+    if !legacy.is_dir() || target.exists() || legacy == target {
+        return;
+    }
+
+    if let Some(parent) = target.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+
+    // Rename is atomic on the same volume; fall back to a copy across volumes.
+    if std::fs::rename(&legacy, &target).is_ok() {
+        return;
+    }
+
+    if copy_dir_recursive(&legacy, &target).is_err() {
+        let _ = std::fs::remove_dir_all(&target);
+    }
+}
+
+fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
+}
+
 fn webview_data_dir() -> std::path::PathBuf {
-    exe_dir().join("TabburritoWebViewData").join("main")
+    data_root().join("main")
 }
 
 fn shell_webview_data_dir() -> std::path::PathBuf {
-    exe_dir().join("TabburritoWebViewData").join("shell")
+    data_root().join("shell")
 }
 
 #[cfg(windows)]
@@ -1834,6 +1905,9 @@ fn main() {
             set_autostart_enabled,
         ])
         .setup(|app| {
+            // Must run before any webview opens the data folder.
+            migrate_legacy_data_dir();
+
             let window = tauri::window::WindowBuilder::new(app, "main")
                 .title("Tabburrito")
                 .inner_size(1200.0, 800.0)

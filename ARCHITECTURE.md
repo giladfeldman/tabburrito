@@ -20,11 +20,15 @@ Runtime entrypoint:
 
 - `tabburrito.exe`
 
-Portable data folder:
+Data folder (resolved by `data_root()` in `src-tauri/src/main.rs`):
 
-- `<exe-folder>\TabburritoWebViewData\main\`
+- Installed (default): `%LOCALAPPDATA%\Tabburrito\TabburritoWebViewData\main\`
+- Portable (opt-in, requires a `portable.txt` marker next to the exe):
+  `<exe-folder>\TabburritoWebViewData\main\`
 
-The app uses one shared WebView2 user-data folder rather than one folder per service. This reduces process/runtime overhead and keeps sessions portable alongside the exe.
+The app uses one shared WebView2 user-data folder rather than one folder per service. This reduces process/runtime overhead.
+
+Data is separated from the exe so installing, updating, or reinstalling never disturbs sessions. Portable mode is opt-in because the default-portable layout caused total session loss on 2026-08-04: the exe lived in a cargo target directory, and cleaning the build cache deleted the sessions stored beside it. `migrate_legacy_data_dir()` adopts a legacy exe-adjacent folder once, only when the new root does not already exist.
 
 ## Managed Services
 
