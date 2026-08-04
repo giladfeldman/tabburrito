@@ -83,6 +83,20 @@ if ((Test-AppRunning) -and -not $Force) {
     Write-Error 'Tabburrito is running - a backup taken now could capture a torn database. Close it and rerun, or pass -Force to accept that risk.'
 }
 
+# WebView2 spawns msedgewebview2.exe children that outlive the parent by a few
+# seconds and keep lockfile/-wal handles open. Wait for the ones using OUR data
+# folder to exit, so a backup taken right after closing the app is complete.
+# Other apps embed WebView2 too, so match on the command line, never on name.
+if (-not (Test-AppRunning)) {
+    for ($i = 0; $i -lt 30; $i++) {
+        $holding = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+                     Where-Object { $_.CommandLine -and $_.CommandLine -like "*$DataDir*" })
+        if (-not $holding) { break }
+        if ($i -eq 0) { Write-Host 'Waiting for WebView2 to release session files...' -ForegroundColor DarkGray }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
 $stamp   = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $zipPath = Join-Path $BackupDir "TabburritoSessions_$stamp.zip"
