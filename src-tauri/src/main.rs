@@ -2348,9 +2348,13 @@ fn install_dir() -> PathBuf {
 //
 // Two measures: cap the cache while running, and purge it on exit.
 
-/// Disk cache ceiling per profile, in bytes. 60 MB across five services is
-/// ample for a warm start without letting caches reach hundreds of MB.
-const DISK_CACHE_LIMIT_BYTES: u64 = 60 * 1024 * 1024;
+/// Disk cache ceiling per profile, in bytes.
+///
+/// 20 MB. These are five long-lived web apps whose assets the cache mostly
+/// re-fetches anyway on a version bump; the cache buys a slightly faster cold
+/// start, not correctness. Lowered from 60 MB after the profile was still
+/// reaching ~100 MB per profile in practice.
+const DISK_CACHE_LIMIT_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Directories that are safe to delete: pure caches, regenerated on demand.
 ///
@@ -2371,6 +2375,21 @@ const PURGEABLE_CACHE_DIRS: &[&str] = &[
     "GrShaderCache",
     "ShaderCache",
     "component_crx_cache",
+    // Downloadable components, not user data. WebView2 re-fetches any of
+    // these on demand if a page ever needs them.
+    //
+    // WidevineCdm is DRM playback (Netflix, Spotify) and was 21.6 MB PER
+    // profile — nothing in this dock plays DRM media. Subresource Filter is
+    // Chrome's ad-filtering ruleset (11.3 MB each), unused because the
+    // blocker here is our own injected script. Speech Recognition and
+    // hyphen-data likewise serve features these five tabs do not use.
+    "WidevineCdm",
+    "Subresource Filter",
+    "Speech Recognition",
+    "hyphen-data",
+    "OnDeviceHeadSuggestModel",
+    "SafetyTips",
+    "Crashpad",
 ];
 
 /// Deletes cache directories from every WebView2 profile under the data root.
@@ -2392,6 +2411,24 @@ fn purge_webview_caches() -> u64 {
             }
             freed += dir_size(&dir);
             let _ = fs::remove_dir_all(&dir);
+        }
+        // Loose telemetry files (BrowserMetrics-spare.pma and friends) that
+        // are recreated on demand — a couple of MB per profile.
+        if let Ok(entries) = fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("BrowserMetrics") && entry.path().is_file() {
+                    freed += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        // BrowserMetrics is also a directory in some builds.
+        let metrics = base.join("BrowserMetrics");
+        if metrics.is_dir() {
+            freed += dir_size(&metrics);
+            let _ = fs::remove_dir_all(&metrics);
         }
     }
     freed

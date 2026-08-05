@@ -178,18 +178,145 @@ try {
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# Fail loudly rather than reporting a green result for an empty archive -
-# a backup that silently contains nothing is worse than no backup at all.
+# --- Verify before trusting -------------------------------------------------
+#
+# Only ONE backup is kept, so it has to be known-good before the previous one
+# is deleted. A size check alone would pass a truncated or corrupt zip; these
+# checks actually open the archive, CRC every entry, and confirm the files
+# that carry the logins are present and non-empty.
+
 $size = (Get-Item -LiteralPath $zipPath).Length
 if ($size -lt 1024) {
     Remove-Item -LiteralPath $zipPath -Force
     Write-Error "Backup produced an implausibly small archive ($size bytes). Nothing was saved."
 }
 
-# Keep the 10 most recent backups.
+Write-Host 'Verifying archive...' -ForegroundColor Cyan
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+$verifyErrors = New-Object System.Collections.Generic.List[string]
+$authFound    = @{}
+$verifiedCount = 0
+
+# Per-entry CRCs are read straight from the zip's central directory.
+#
+# ZipArchiveEntry has no Crc32 property on .NET Framework (Windows PowerShell
+# 5.1) - it is null there, so comparing against it silently compares against
+# nothing and rejects healthy archives. Verified 2026-08-05. Parse the
+# central directory instead, which is version-independent.
+function Get-ZipEntryCrcs {
+    param([string]$Path)
+    $crcs = @{}
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    # Central directory file header signature: PK\x01\x02
+    for ($i = 0; $i -lt $bytes.Length - 46; $i++) {
+        if ($bytes[$i] -eq 0x50 -and $bytes[$i+1] -eq 0x4B -and
+            $bytes[$i+2] -eq 0x01 -and $bytes[$i+3] -eq 0x02) {
+            $crc = [System.BitConverter]::ToUInt32($bytes, $i + 16)
+            $nameLen  = [System.BitConverter]::ToUInt16($bytes, $i + 28)
+            $extraLen = [System.BitConverter]::ToUInt16($bytes, $i + 30)
+            $cmtLen   = [System.BitConverter]::ToUInt16($bytes, $i + 32)
+            $name = [System.Text.Encoding]::UTF8.GetString($bytes, $i + 46, $nameLen)
+            $crcs[$name.Replace('/', '\')] = $crc
+            $i += 45 + $nameLen + $extraLen + $cmtLen
+        }
+    }
+    return $crcs
+}
+
+# Standard CRC-32 (IEEE 802.3, polynomial 0xEDB88320) lookup table - the same
+# checksum zip records per entry. Built once; the per-entry loop below is hot.
+$Crc32Table = New-Object uint32[] 256
+for ($n = 0; $n -lt 256; $n++) {
+    $c = [uint32]$n
+    for ($k = 0; $k -lt 8; $k++) {
+        if ($c -band 1) { $c = 0xEDB88320 -bxor ($c -shr 1) } else { $c = $c -shr 1 }
+    }
+    $Crc32Table[$n] = $c
+}
+
+$expectedCrcs = Get-ZipEntryCrcs -Path $zipPath
+# Files that must be present for a restore to actually preserve logins.
+# IndexedDB matters as much as Cookies: WhatsApp keeps its session keys
+# there, and without it a restore still means re-scanning the QR code.
+$requiredAuth = @('Cookies', 'Login Data', 'IndexedDB')
+
+try {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    try {
+        $verifiedCount = $zip.Entries.Count
+        foreach ($entry in $zip.Entries) {
+            if ($entry.Length -eq 0) { continue }
+
+            # Read each entry and compare the CRC32 we compute against the one
+            # recorded in the archive.
+            #
+            # Reading alone is NOT sufficient: .NET validates the CRC only on
+            # the DEFLATE path. Entries that Compress-Archive chose to STORE
+            # uncompressed (already-compressed or high-entropy data, which
+            # includes plenty of a WebView2 profile) stream back corrupted
+            # bytes without error. Verified 2026-08-05: flipping 1000 bytes
+            # inside a stored entry produced 0 read errors, and the archive
+            # would have been accepted as healthy.
+            try {
+                $stream = $entry.Open()
+                try {
+                    $crc    = [uint32]::MaxValue
+                    $buffer = New-Object byte[] 65536
+                    while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        for ($i = 0; $i -lt $read; $i++) {
+                            $crc = ($crc -shr 8) -bxor $Crc32Table[[int](($crc -bxor $buffer[$i]) -band 0xFF)]
+                        }
+                    }
+                    $crc = $crc -bxor [uint32]::MaxValue
+                } finally { $stream.Dispose() }
+            } catch {
+                $verifyErrors.Add("$($entry.FullName): $($_.Exception.Message)")
+                continue
+            }
+
+            $key = $entry.FullName.Replace('/', '\')
+            $expected = $expectedCrcs[$key]
+            if ($null -eq $expected) {
+                $verifyErrors.Add("$($entry.FullName): no CRC recorded in the archive index")
+                continue
+            }
+            if ($crc -ne $expected) {
+                $verifyErrors.Add("$($entry.FullName): CRC mismatch (got $crc, expected $expected)")
+                continue
+            }
+
+            foreach ($needle in $requiredAuth) {
+                if ($entry.FullName -like "*$needle*") { $authFound[$needle] = $true }
+            }
+        }
+    } finally { $zip.Dispose() }
+} catch {
+    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+    Write-Error "Archive could not be opened - it is corrupt. Deleted; the previous backup was kept. $($_.Exception.Message)"
+}
+
+if ($verifyErrors.Count) {
+    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+    $detail = ($verifyErrors | Select-Object -First 3) -join '; '
+    Write-Error "Archive failed CRC verification on $($verifyErrors.Count) entry(ies) - deleted, previous backup kept. $detail"
+}
+
+$missingAuth = $requiredAuth | Where-Object { -not $authFound[$_] }
+if ($missingAuth -and -not $Full) {
+    # A zip that verifies cleanly but has no login data would restore nothing
+    # useful - exactly the false-confidence case this whole script exists for.
+    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+    Write-Error "Archive is missing login data ($($missingAuth -join ', ')) - deleted, previous backup kept. Restoring it would not preserve your sessions."
+}
+
+Write-Host ("  Verified: {0:N0} entries, CRC OK, login data present." -f $verifiedCount) -ForegroundColor Green
+
+# Keep only the newest backup. Pruning happens AFTER verification above, so a
+# corrupt new archive never displaces a good older one.
 Get-ChildItem -LiteralPath $BackupDir -Filter '*.zip' |
     Sort-Object LastWriteTime -Descending |
-    Select-Object -Skip 10 |
+    Select-Object -Skip 1 |
     Remove-Item -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
