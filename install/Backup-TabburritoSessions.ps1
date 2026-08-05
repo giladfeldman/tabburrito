@@ -40,7 +40,8 @@ param(
     [switch]$Restore,
     [string]$Path,
     [switch]$Force,
-    [switch]$SkipIfRunning
+    [switch]$SkipIfRunning,
+    [switch]$Full
 )
 
 Set-StrictMode -Version Latest
@@ -123,12 +124,36 @@ Write-Host 'Backing up sessions...' -ForegroundColor Cyan
 # only the locked files and still capture everything else.
 $staging = Join-Path $env:TEMP "TabburritoBackupStaging_$stamp"
 $skipped = New-Object System.Collections.Generic.List[string]
+$excludedBytes = 0L
+$excludedCount = 0
+
+# Cache directories only. Anchored on path segments so a site whose name
+# happens to contain "Cache" cannot be caught by accident. Service Worker's
+# CacheStorage/ScriptCache are caches; its sibling Database (registrations)
+# is NOT matched and is kept.
+$CacheExcludePattern = '(^|\\)(Cache|Code Cache|GPUCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache|GrShaderCache|ShaderCache|component_crx_cache|Subresource Filter|WidevineCdm|BrowserMetrics|Crashpad|CacheStorage|ScriptCache)(\\|$)'
 
 try {
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
     foreach ($item in Get-ChildItem -LiteralPath $DataDir -Recurse -File -Force) {
         $relative = $item.FullName.Substring($DataDir.Length).TrimStart('\')
+
+        # Skip pure caches. They are ~95% of the folder (Cache 217 MB +
+        # Code Cache 146 MB when this was added) and regenerate on demand,
+        # so archiving them only bloats every snapshot.
+        #
+        # What is KEPT is deliberate: Cookies and Login Data hold the session
+        # tokens, and IndexedDB is where WhatsApp stores its session keys -
+        # dropping it would force a QR re-scan, exactly what this protects
+        # against. Local/Session Storage, Preferences and Web Data are small
+        # and carry per-site auth state.
+        if (-not $Full -and ($relative -match $CacheExcludePattern)) {
+            $excludedBytes += $item.Length
+            $excludedCount++
+            continue
+        }
+
         $dest     = Join-Path $staging $relative
         $destDir  = Split-Path -Parent $dest
         if (-not (Test-Path -LiteralPath $destDir)) {
@@ -171,6 +196,14 @@ Write-Host ''
 Write-Host 'Backup complete.' -ForegroundColor Green
 Write-Host ("  File: {0}" -f $zipPath)
 Write-Host ("  Size: {0:N1} MB" -f ($size / 1MB))
+
+if ($excludedCount) {
+    # Never let an exclusion be silent - a smaller archive must be explained,
+    # or it reads as "everything was captured" when it was not.
+    Write-Host ("  Mode: logins only - excluded {0:N0} cache file(s), {1:N1} MB" -f $excludedCount, ($excludedBytes / 1MB)) -ForegroundColor DarkGray
+    Write-Host '  Cookies, Login Data, IndexedDB and site storage ARE included.' -ForegroundColor DarkGray
+    Write-Host '  Use -Full to archive caches too.' -ForegroundColor DarkGray
+}
 
 if ($skipped.Count) {
     Write-Host ("  Skipped {0} locked file(s):" -f $skipped.Count) -ForegroundColor Yellow

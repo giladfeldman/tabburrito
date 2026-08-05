@@ -601,6 +601,68 @@ const PASTE_HELPERS_JS: &str = r#"
         return null;
     }
 
+    // A screen capture (ShareX, Snipping Tool, PrtScn) puts real bitmap DATA
+    // on the clipboard, so imageItemFrom finds a file. "Copy image" in a
+    // browser does NOT: it copies an HTML fragment referencing the image by
+    // URL, so there is no file to attach and a naive handler silently does
+    // nothing. Recover the URL so copying an image from Bluesky/X/anywhere
+    // works the same as a screenshot.
+    function imageUrlFromClipboard(clipboardData) {
+        if (!clipboardData || !clipboardData.getData) return null;
+
+        var html = '';
+        try { html = clipboardData.getData('text/html') || ''; } catch (e) {}
+        if (html) {
+            // Prefer srcset's first candidate? No — src is the canonical
+            // single image; srcset entries can be tiny thumbnails.
+            var m = html.match(/<img[^>]+src\s*=\s*["']([^"']+)["']/i);
+            if (m && m[1]) return decodeHtmlEntities(m[1]);
+        }
+
+        var text = '';
+        try { text = (clipboardData.getData('text/plain') || '').trim(); } catch (e) {}
+        // A bare image URL, or a data: URI copied as text.
+        if (/^data:image\//i.test(text)) return text;
+        if (/^https?:\/\//i.test(text) && !/\s/.test(text)) return text;
+
+        return null;
+    }
+
+    function decodeHtmlEntities(s) {
+        var el = document.createElement('textarea');
+        el.innerHTML = s;
+        return el.value;
+    }
+
+    // Fetch a referenced image and turn it into a File.
+    //
+    // Runs in the page's own context, so it carries the page's credentials
+    // and origin — a CDN that allows the site's own images will serve these.
+    // Anything that fails (hotlink protection, CORS, an HTML error page) is
+    // reported rather than silently attaching garbage.
+    function fileFromUrl(url) {
+        return fetch(url, { credentials: 'omit', mode: 'cors' })
+            .catch(function() {
+                // no-cors gives an opaque response we cannot read, so a
+                // second attempt would not help; surface the original error.
+                return Promise.reject(new Error('fetch blocked'));
+            })
+            .then(function(res) {
+                if (!res || !res.ok) throw new Error('HTTP ' + (res && res.status));
+                return res.blob();
+            })
+            .then(function(blob) {
+                if (!blob || !/^image\//i.test(blob.type || '')) {
+                    throw new Error('not an image (' + (blob && blob.type) + ')');
+                }
+                return new File(
+                    [blob],
+                    'pasted-image.' + extensionFor(blob.type),
+                    { type: blob.type }
+                );
+            });
+    }
+
     function extensionFor(mime) {
         if (/png/i.test(mime)) return 'png';
         if (/jpe?g/i.test(mime)) return 'jpg';
@@ -663,41 +725,66 @@ const PASTE_HELPERS_JS: &str = r#"
             }
         }
 
-        var item = imageItemFrom(event.clipboardData);
-        if (!item) return;
         // Only hijack pastes aimed at a composer/comment box, so pasting an
         // image into search or an unrelated field is left alone.
         if (!inComposer(event.target)) return;
 
-        // Sites that already accept pasted images (WhatsApp, Messenger)
-        // handle this themselves; intercepting would double-attach. Only
-        // step in where no image file input is reachable from the composer,
-        // which is the LinkedIn case this exists for.
+        // Sites that already accept pasted images (WhatsApp, Bluesky) handle
+        // this themselves; intercepting would double-attach. Only step in
+        // where the site has no image paste of its own.
         if (window.__tbPasteImageNative) return;
 
-        var file = item.getAsFile();
-        if (!file) return;
+        // Two clipboard shapes reach us:
+        //  - a screen capture (ShareX, PrtScn) carries real bitmap DATA;
+        //  - "Copy image" in a browser carries only an HTML <img> REFERENCE,
+        //    which is why copying from Bluesky previously did nothing.
+        var item = imageItemFrom(event.clipboardData);
+        var url = item ? null : imageUrlFromClipboard(event.clipboardData);
+        if (!item && !url) return;
 
         // We are handling it — stop the site inserting a stray text node.
         event.preventDefault();
         event.stopPropagation();
 
+        var filePromise;
+        if (item) {
+            var f = item.getAsFile();
+            if (!f) return;
+            var type = f.type || 'image/png';
+            filePromise = Promise.resolve(new File(
+                [f],
+                'pasted-image.' + extensionFor(type),
+                { type: type, lastModified: f.lastModified || 0 }
+            ));
+        } else {
+            filePromise = fileFromUrl(url);
+        }
+
         var scope = composerScope();
         var input = findImageInput(scope);
         var ready = input ? Promise.resolve(input) : (clickOpenMedia(scope), waitForInput(4000));
 
-        ready.then(function(fileInput) {
+        Promise.all([ready, filePromise]).then(function(pair) {
+            var fileInput = pair[0];
+            var named = pair[1];
             if (!fileInput) {
                 console.warn('[Tabburrito] paste-image: no image file input found');
                 return;
             }
-            var type = file.type || 'image/png';
-            var named = new File(
-                [file],
-                'pasted-image.' + extensionFor(type),
-                { type: type, lastModified: file.lastModified || 0 }
-            );
+
+            // LinkedIn posts accept MULTIPLE images. Assigning a fresh
+            // DataTransfer would drop whatever is already attached, so carry
+            // the existing selection over and append. Only do this when the
+            // input actually allows multiple files.
             var dt = new DataTransfer();
+            var existing = fileInput.files;
+            if (fileInput.multiple && existing && existing.length) {
+                for (var i = 0; i < existing.length; i++) dt.items.add(existing[i]);
+                // Give each addition a distinct name so the site does not
+                // dedupe them as the same upload.
+                named = new File([named], 'pasted-image-' + (existing.length + 1) +
+                    '.' + extensionFor(named.type), { type: named.type });
+            }
             dt.items.add(named);
             fileInput.files = dt.files;
             // React/Ember listeners need a bubbling event; a bare
@@ -705,11 +792,11 @@ const PASTE_HELPERS_JS: &str = r#"
             fileInput.dispatchEvent(new Event('input', { bubbles: true }));
             fileInput.dispatchEvent(new Event('change', { bubbles: true }));
         }).catch(function(err) {
-            console.warn('[Tabburrito] paste-image failed', err);
+            console.warn('[Tabburrito] paste-image failed:', err && err.message ? err.message : err);
         });
     }, true);
 
-    console.log('[Tabburrito] LinkedIn paste-image active');
+    console.log('[Tabburrito] paste helpers active');
 })();
 "#;
 
@@ -2252,6 +2339,78 @@ fn install_dir() -> PathBuf {
         .join("Tabburrito")
 }
 
+// --- Cache hygiene ---------------------------------------------------------
+//
+// WebView2's default disk cache is effectively unbounded, and the session
+// folder had grown to 429 MB (Cache 217 MB + Code Cache 146 MB) for five
+// tabs. That bloats every backup and serves no purpose for a dock whose tabs
+// are long-lived web apps.
+//
+// Two measures: cap the cache while running, and purge it on exit.
+
+/// Disk cache ceiling per profile, in bytes. 60 MB across five services is
+/// ample for a warm start without letting caches reach hundreds of MB.
+const DISK_CACHE_LIMIT_BYTES: u64 = 60 * 1024 * 1024;
+
+/// Directories that are safe to delete: pure caches, regenerated on demand.
+///
+/// Deliberately EXCLUDES everything that carries a login. Cookies, Login
+/// Data, Local/Session Storage, Preferences and Web Data all live elsewhere,
+/// and IndexedDB is where WhatsApp keeps its session keys (26 MB) — deleting
+/// it would force a QR re-scan, the exact thing this app exists to avoid.
+/// "Service Worker\CacheStorage" and "ScriptCache" are caches; the sibling
+/// "Database" directory holds SW registrations and is left alone.
+const PURGEABLE_CACHE_DIRS: &[&str] = &[
+    "Default/Cache",
+    "Default/Code Cache",
+    "Default/GPUCache",
+    "Default/DawnGraphiteCache",
+    "Default/DawnWebGPUCache",
+    "Default/Service Worker/CacheStorage",
+    "Default/Service Worker/ScriptCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "component_crx_cache",
+];
+
+/// Deletes cache directories from every WebView2 profile under the data root.
+///
+/// Best-effort by design: a locked file must never block shutdown, and a
+/// cache that survives one run is simply purged on the next.
+fn purge_webview_caches() -> u64 {
+    let root = data_root();
+    let mut freed = 0u64;
+    for profile in ["main", "shell"] {
+        let base = root.join(profile).join("EBWebView");
+        if !base.is_dir() {
+            continue;
+        }
+        for rel in PURGEABLE_CACHE_DIRS {
+            let dir = base.join(rel.replace('/', "\\"));
+            if !dir.is_dir() {
+                continue;
+            }
+            freed += dir_size(&dir);
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+    freed
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(_) => e.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
 /// Modification time of the installed exe as observed at startup.
 ///
 /// Captured once at launch so a later update — which replaces the exe while
@@ -2562,6 +2721,27 @@ async fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(
 }
 
 fn main() {
+    // Cap WebView2's disk cache. Must be set before the runtime initializes,
+    // hence the very top of main(). Without it the cache is effectively
+    // unbounded — it had reached 363 MB across Cache + Code Cache alone.
+    //
+    // Appends rather than overwrites, so a value the user set outside the app
+    // is preserved.
+    #[cfg(windows)]
+    {
+        const KEY: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+        let cap = format!("--disk-cache-size={DISK_CACHE_LIMIT_BYTES}");
+        let existing = std::env::var(KEY).unwrap_or_default();
+        let combined = if existing.contains("--disk-cache-size") {
+            existing
+        } else if existing.trim().is_empty() {
+            cap
+        } else {
+            format!("{existing} {cap}")
+        };
+        std::env::set_var(KEY, combined);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_window("main") {
@@ -2611,6 +2791,18 @@ fn main() {
             migrate_legacy_data_dir();
             // Baseline for detecting an update that landed while we run.
             record_exe_mtime_at_launch();
+
+            // Clear caches left by the previous run before any webview opens
+            // the profile — WebView2 holds these directories open while
+            // running, so shutdown is best-effort and startup is the reliable
+            // point to reclaim the space.
+            let freed = purge_webview_caches();
+            if freed > 0 {
+                println!(
+                    "[Tabburrito] purged {} MB of WebView2 cache",
+                    freed / (1024 * 1024)
+                );
+            }
 
             let window = tauri::window::WindowBuilder::new(app, "main")
                 .title("Tabburrito")
