@@ -16,6 +16,12 @@ tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+# Native image fetch for paste-from-another-site. Cannot be done in the page:
+# CDNs like Bluesky's send no Access-Control-Allow-Origin, so a page-context
+# fetch is blocked by CORS. Already in the tree via Tauri; pinned explicitly
+# because we now depend on it directly. rustls avoids an OpenSSL build dep.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
