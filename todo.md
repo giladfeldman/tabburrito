@@ -46,6 +46,12 @@ Session sync is the risky part and is deliberately NOT bundled with it.
   remote commit. Detection, the dirty-tree guard, and build-failure safety were each tested
   2026-08-04, but a full fetch->rebuild->reinstall cycle has never run from an actually-newer
   origin/main. Do this once after the next push lands.
+  *(2026-08-05: partially closed. The updater now has an in-app surface (Settings > Updates)
+  and two real defects were fixed — `schtasks /Query` exits 0 for a DISABLED task, so the
+  toggle reported "on" for a task Windows would never run; and `set_auto_update_enabled`
+  trusted the exit code alone. A manual check run was verified end to end ("Already up to
+  date", exit 0). The fetch->rebuild->reinstall path from an actually-newer origin/main is
+  STILL unverified — commit bb01b52 is the first candidate to test it against.)*
 
 - [ ] INST-2 | chore | P3 | status:open | Schedule automatic session backups (weekly), reusing the
   `Register-AutoUpdate.ps1` schtasks/XML approach. `Register-ScheduledTask` fails with
