@@ -642,17 +642,14 @@ const PASTE_HELPERS_JS: &str = r#"
     // reported rather than silently attaching garbage.
     function fileFromUrl(url) {
         return fetch(url, { credentials: 'omit', mode: 'cors' })
+            .catch(function() {
+                // no-cors gives an opaque response we cannot read, so a
+                // second attempt would not help; surface the original error.
+                return Promise.reject(new Error('fetch blocked'));
+            })
             .then(function(res) {
                 if (!res || !res.ok) throw new Error('HTTP ' + (res && res.status));
                 return res.blob();
-            })
-            .catch(function() {
-                // Image CDNs commonly send no Access-Control-Allow-Origin
-                // (verified for cdn.bsky.app on 2026-08-05), so the in-page
-                // fetch above is blocked by CORS and cannot read the bytes.
-                // Fall back to a NATIVE fetch in the Tauri host, which is not
-                // subject to the browser's cross-origin boundary.
-                return nativeFetchBlob(url);
             })
             .then(function(blob) {
                 if (!blob || !/^image\//i.test(blob.type || '')) {
@@ -664,16 +661,6 @@ const PASTE_HELPERS_JS: &str = r#"
                     { type: blob.type }
                 );
             });
-    }
-
-    // Ask the Rust side to fetch the image and hand it back as a data URI,
-    // which we can turn into a Blob without any cross-origin restriction.
-    function nativeFetchBlob(url) {
-        var invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
-        if (!invoke) return Promise.reject(new Error('image is cross-origin and native fetch is unavailable'));
-        return invoke('fetch_image_as_data_uri', { url: url })
-            .then(function(dataUri) { return fetch(dataUri); })
-            .then(function(r) { return r.blob(); });
     }
 
     function extensionFor(mime) {
@@ -785,39 +772,20 @@ const PASTE_HELPERS_JS: &str = r#"
                 return;
             }
 
-            // LinkedIn posts accept multiple images, but reading back
-            // fileInput.files to append to is NOT reliable: the site consumes
-            // the selection on `change` and clears the input, so by the second
-            // paste there is nothing left to carry over — which is why only
-            // the first image ever landed. Track what we attached ourselves,
-            // keyed on the input element, and re-present the whole set.
-            if (!window.__tbPastedFiles) window.__tbPastedFiles = [];
-            if (window.__tbPastedInput !== fileInput) {
-                // A different composer (or a reopened one): start fresh.
-                window.__tbPastedInput = fileInput;
-                window.__tbPastedFiles = [];
-            }
-
-            // Distinct names so the site cannot treat them as one upload.
-            named = new File(
-                [named],
-                'pasted-image-' + (window.__tbPastedFiles.length + 1) + '.' + extensionFor(named.type),
-                { type: named.type }
-            );
-            window.__tbPastedFiles.push(named);
-
+            // LinkedIn posts accept MULTIPLE images. Assigning a fresh
+            // DataTransfer would drop whatever is already attached, so carry
+            // the existing selection over and append. Only do this when the
+            // input actually allows multiple files.
             var dt = new DataTransfer();
-            // Anything the user attached through the file picker is still in
-            // the input; keep it, then add every image we have pasted.
             var existing = fileInput.files;
-            if (existing && existing.length) {
-                for (var i = 0; i < existing.length; i++) {
-                    if (!/^pasted-image-/.test(existing[i].name)) dt.items.add(existing[i]);
-                }
+            if (fileInput.multiple && existing && existing.length) {
+                for (var i = 0; i < existing.length; i++) dt.items.add(existing[i]);
+                // Give each addition a distinct name so the site does not
+                // dedupe them as the same upload.
+                named = new File([named], 'pasted-image-' + (existing.length + 1) +
+                    '.' + extensionFor(named.type), { type: named.type });
             }
-            for (var j = 0; j < window.__tbPastedFiles.length; j++) {
-                dt.items.add(window.__tbPastedFiles[j]);
-            }
+            dt.items.add(named);
             fileInput.files = dt.files;
             // React/Ember listeners need a bubbling event; a bare
             // new Event('change') does not reach delegated handlers.
@@ -2311,88 +2279,6 @@ async fn set_unload_seconds(app: tauri::AppHandle, seconds: u64) -> Result<(), S
     Ok(())
 }
 
-/// Largest image we will pull in for a paste. LinkedIn's own limit is 8 MB
-/// per image; 25 MB leaves room for a large source that the site will
-/// downscale, while bounding what a page can make us buffer.
-const MAX_PASTE_IMAGE_BYTES: usize = 25 * 1024 * 1024;
-
-/// Fetches an image for paste-from-another-site and returns it as a data URI.
-///
-/// This exists because the page CANNOT do it. Copying an image in a browser
-/// puts only an <img> URL on the clipboard, and image CDNs commonly serve no
-/// `Access-Control-Allow-Origin` header — verified 2026-08-05: Bluesky's
-/// cdn.bsky.app returns the image with no ACAO, so a fetch from
-/// linkedin.com is blocked by CORS and the bytes are unreadable in-page.
-/// A native request is not subject to that boundary.
-///
-/// Deliberately narrow, because page JavaScript can call it:
-///  - https only, so it cannot be used to read local files or intranet hosts
-///    over http;
-///  - the response must actually be an image, so it is not a general-purpose
-///    fetch primitive for exfiltrating pages;
-///  - size-capped, and returns only a data URI (no headers, no cookies are
-///    ever sent, so it cannot read anything behind the user's auth).
-#[tauri::command]
-async fn fetch_image_as_data_uri(url: String) -> Result<String, String> {
-    let parsed: url::Url = url.parse().map_err(|_| "invalid URL".to_string())?;
-    if parsed.scheme() != "https" {
-        return Err("only https image URLs are supported".to_string());
-    }
-
-    let client = reqwest::Client::builder()
-        .user_agent(CHROME_UA)
-        .timeout(Duration::from_secs(20))
-        // No cookie store: this must never carry the user's credentials to a
-        // third-party host.
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let resp = client
-        .get(parsed)
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
-
-    if !content_type.starts_with("image/") {
-        return Err(format!("not an image (content-type: {content_type})"));
-    }
-
-    // Reject an oversized body before buffering it, when the server declares
-    // a length; the streaming guard below covers chunked responses.
-    if let Some(len) = resp.content_length() {
-        if len as usize > MAX_PASTE_IMAGE_BYTES {
-            return Err(format!("image too large ({} MB)", len / (1024 * 1024)));
-        }
-    }
-
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_PASTE_IMAGE_BYTES {
-        return Err("image too large".to_string());
-    }
-    if bytes.is_empty() {
-        return Err("empty response".to_string());
-    }
-
-    use base64::Engine as _;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{content_type};base64,{encoded}"))
-}
-
 // --- Updates ---------------------------------------------------------------
 //
 // The update mechanism itself lives in install\Update-Tabburrito.ps1 (git
@@ -2936,7 +2822,6 @@ fn main() {
             toggle_settings,
             set_service_muted,
             get_service_mutes,
-            fetch_image_as_data_uri,
         ])
         .setup(|app| {
             // Must run before any webview opens the data folder.
