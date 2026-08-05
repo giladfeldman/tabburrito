@@ -40,6 +40,31 @@ Session sync is the risky part and is deliberately NOT bundled with it.
   Also ~14 MB of constantly-changing binary SQLite. Only revisit with a hardware-backed key
   and an explicit threat-model decision.
 
+## Clipboard paste follow-ups (2026-08-05)
+
+- [ ] PASTE-1 | bug | P3 | status:open | Pasting a SECOND image into a LinkedIn
+  post does not attach it; only the first lands. Two attempts failed:
+  (a) appending by reading back `fileInput.files` — LinkedIn consumes the
+  selection on `change` and clears the input, so nothing carries over;
+  (b) tracking the pasted set in the page (`window.__tbPastedFiles`) and
+  re-presenting it. Attempt (b) PASSED a jsdom test that simulated the
+  clearing and still failed in the real app, which means the mock does not
+  match LinkedIn's real composer.
+  **Next step is observation, not another patch:** inspect the live composer
+  (which element receives the file, whether a fresh input is mounted per
+  image, what happens on `change`) and write the test from what is actually
+  there. Single-image paste works — do not risk it chasing this.
+
+- [ ] PASTE-2 | feature | P4 | status:blocked | Pasting an image COPIED from
+  another site (e.g. Bluesky) does nothing. The clipboard carries only an
+  `<img>` URL, and image CDNs commonly send no `Access-Control-Allow-Origin`
+  (verified for `cdn.bsky.app`), so the page cannot read the bytes. A
+  host-side fetch works (verified: 127,646 bytes retrieved natively), but the
+  delivery route tried — a Tauri capability granting service webviews IPC via
+  `remote.urls` — **blanked every tab** (5331082, reverted in 88082ae) because
+  declaring a remote origin IPC-enabled breaks page scripts under a strict CSP.
+  Needs a different channel entirely. Copying within the same site works.
+
 ## Install / robustness follow-ups (2026-08-04)
 
 - [ ] INST-1 | chore | P2 | status:open | Verify the auto-update task end-to-end against a real
