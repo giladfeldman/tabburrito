@@ -103,6 +103,17 @@ function toggleLinkedInFeedSort() {
   syncLinkedInFeedSort();
 }
 
+// Reflects the current service's adblock state in the indicator. Shared by
+// updateForService, the indicator's own click handler, and the settings panel.
+function updateAdblockButton() {
+  const ab = document.getElementById('adblock-indicator');
+  if (!ab || !currentService) return;
+  const enabled = getAdblock(currentService);
+  ab.classList.add('visible');
+  ab.classList.toggle('disabled', !enabled);
+  ab.textContent = enabled ? '\u{1F6E1} AdBlock On' : '\u{1F6E1} AdBlock Off';
+}
+
 function updateForService(id) {
   currentService = id;
   const svc = SERVICES.find(s => s.id === id);
@@ -112,13 +123,7 @@ function updateForService(id) {
   document.getElementById('url-input').value = svc.url;
   document.getElementById('zoom-label').textContent = getZoom(id) + '%';
 
-  // Adblock indicator per service
-  const ab = document.getElementById('adblock-indicator');
-  const enabled = getAdblock(id);
-  ab.classList.add('visible');
-  ab.classList.toggle('disabled', !enabled);
-  ab.textContent = enabled ? '\u{1F6E1} AdBlock On' : '\u{1F6E1} AdBlock Off';
-
+  updateAdblockButton();
   updateFeedSortToggle();
 
   // Apply saved zoom
@@ -302,6 +307,33 @@ if (window.__TAURI__) {
       const id = payload.serviceId || payload.service_id;
       if (!id || id === currentService) return;
       updateForService(id);
+    }).catch(() => {});
+
+    // The settings panel owns no state of its own — LinkedIn sort and the
+    // adblock toggle live here, so mirror its changes into this webview's
+    // store and keep the URL-bar controls in step.
+    window.__TAURI__.event.listen('tb-settings-change', (event) => {
+      const { key, value } = event.payload || {};
+      if (key === 'linkedinSort') {
+        linkedinFeedSort = value === 'top' ? 'top' : 'recent';
+        saveState();
+        updateFeedSortToggle();
+        syncLinkedInFeedSort();
+      } else if (key === 'linkedinAdblock') {
+        setAdblock('linkedin', !!value);
+        updateAdblockButton();
+        // The blocker is injected on page load, so toggling it only takes
+        // effect after a reload — same as the indicator's click handler.
+        window.__TAURI__.core.invoke('reload_service', { label: 'linkedin' }).catch(() => {});
+      }
+    }).catch(() => {});
+
+    // Answer the panel's state request with what this webview owns.
+    window.__TAURI__.event.listen('tb-settings-request-state', () => {
+      window.__TAURI__.event.emit('tb-settings-state', {
+        linkedinSort: linkedinFeedSort,
+        linkedinAdblock: getAdblock('linkedin'),
+      });
     }).catch(() => {});
   }
 }

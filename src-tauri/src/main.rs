@@ -2,8 +2,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
+
+/// Keeps helper processes (the PowerShell updater) from flashing a console
+/// window. Same value as winapi's CREATE_NO_WINDOW.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use tauri::{
     image::Image,
@@ -459,6 +466,174 @@ const LINKEDIN_ADBLOCK_JS: &str = r#"
     }, 5000);
 
     console.log('[Tabburrito] LinkedIn blocker active');
+})();
+"#;
+
+// LinkedIn clipboard-image paste.
+//
+// LinkedIn's composer has no `paste` handler for image blobs (unlike X and
+// Bluesky), so a screenshot must be saved to disk and re-selected through the
+// file picker. This bridges that gap: it takes the image off the clipboard,
+// wraps it in a File, and hands it to LinkedIn's OWN hidden
+// <input type="file"> via a synthetic DataTransfer. That is the same code path
+// the file picker drives, so previews, cropping, and alt-text all behave
+// normally — we are not reimplementing the uploader, just feeding it.
+//
+// The known Chrome extension for this (PEZ/linkedin-paste-image) requires the
+// user to open the image dialog and dismiss it first, because the file input
+// is not mounted until the media flow opens. We instead click the composer's
+// image button ourselves and wait for the input to appear, so a plain Ctrl+V
+// is enough.
+//
+// DOM-volatility policy matches LINKEDIN_ADBLOCK_JS: match on semantic
+// anchors (aria-label, accept, contenteditable) and never on hashed classes.
+const LINKEDIN_PASTE_IMAGE_JS: &str = r#"
+(function() {
+    'use strict';
+    if (window.__tbPasteImageBootstrapped) return;
+    window.__tbPasteImageBootstrapped = true;
+
+    var OPEN_MEDIA_SELECTORS = [
+        'button[aria-label*="add media" i]',
+        'button[aria-label*="add a photo" i]',
+        'button[aria-label*="add photo" i]',
+        'button[aria-label*="photo" i]',
+        'button[aria-label*="image" i]'
+    ];
+
+    function isVisible(el) {
+        if (!el) return false;
+        var r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    }
+
+    // The composer dialog, when open, is the correct scope. Falling back to
+    // the whole document would risk grabbing an unrelated image input
+    // (e.g. the profile-photo uploader) and posting into the wrong place.
+    function composerScope() {
+        var dialog = document.querySelector('div[role="dialog"]');
+        if (dialog && isVisible(dialog)) return dialog;
+        var editor = document.querySelector('div[role="textbox"][contenteditable="true"]');
+        if (editor) {
+            var box = editor.closest('form') || editor.parentElement;
+            for (var i = 0; box && i < 6; i++) {
+                if (box.querySelector('input[type="file"]')) return box;
+                box = box.parentElement;
+            }
+        }
+        return document;
+    }
+
+    function findImageInput(scope) {
+        var inputs = (scope || document).querySelectorAll('input[type="file"]');
+        for (var i = 0; i < inputs.length; i++) {
+            var accept = inputs[i].accept || '';
+            // accept="image/*" or an explicit list containing an image type.
+            if (/image/i.test(accept)) return inputs[i];
+        }
+        return null;
+    }
+
+    function clickOpenMedia(scope) {
+        var root = (scope && scope !== document) ? scope : document;
+        for (var s = 0; s < OPEN_MEDIA_SELECTORS.length; s++) {
+            var btns = root.querySelectorAll(OPEN_MEDIA_SELECTORS[s]);
+            for (var i = 0; i < btns.length; i++) {
+                if (isVisible(btns[i])) { btns[i].click(); return true; }
+            }
+        }
+        return false;
+    }
+
+    // Wait for LinkedIn to mount the file input after we open the media flow.
+    function waitForInput(timeoutMs) {
+        return new Promise(function(resolve) {
+            var found = findImageInput(composerScope());
+            if (found) { resolve(found); return; }
+            var done = false;
+            var obs = new MutationObserver(function() {
+                var el = findImageInput(composerScope());
+                if (el && !done) { done = true; obs.disconnect(); resolve(el); }
+            });
+            obs.observe(document.documentElement, { childList: true, subtree: true });
+            setTimeout(function() {
+                if (done) return;
+                done = true;
+                obs.disconnect();
+                resolve(findImageInput(composerScope()));
+            }, timeoutMs);
+        });
+    }
+
+    // Screenshot clipboards commonly carry text/html at index 0 with the
+    // image later, so scan every item rather than trusting items[0].
+    function imageItemFrom(clipboardData) {
+        if (!clipboardData) return null;
+        var items = clipboardData.items;
+        if (!items) return null;
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] && items[i].kind === 'file' && /^image\//i.test(items[i].type || '')) {
+                return items[i];
+            }
+        }
+        return null;
+    }
+
+    function extensionFor(mime) {
+        if (/png/i.test(mime)) return 'png';
+        if (/jpe?g/i.test(mime)) return 'jpg';
+        if (/gif/i.test(mime)) return 'gif';
+        if (/webp/i.test(mime)) return 'webp';
+        return 'png';
+    }
+
+    function inComposer(target) {
+        if (!target || !target.closest) return false;
+        return !!target.closest('div[role="textbox"][contenteditable="true"], div[role="dialog"], form');
+    }
+
+    document.addEventListener('paste', function(event) {
+        var item = imageItemFrom(event.clipboardData);
+        if (!item) return;
+        // Only hijack pastes aimed at a composer/comment box, so pasting an
+        // image into search or an unrelated field is left alone.
+        if (!inComposer(event.target)) return;
+
+        var file = item.getAsFile();
+        if (!file) return;
+
+        // We are handling it — stop LinkedIn from inserting a stray text node.
+        event.preventDefault();
+        event.stopPropagation();
+
+        var scope = composerScope();
+        var input = findImageInput(scope);
+        var ready = input ? Promise.resolve(input) : (clickOpenMedia(scope), waitForInput(4000));
+
+        ready.then(function(fileInput) {
+            if (!fileInput) {
+                console.warn('[Tabburrito] paste-image: no image file input found');
+                return;
+            }
+            var type = file.type || 'image/png';
+            var named = new File(
+                [file],
+                'pasted-image.' + extensionFor(type),
+                { type: type, lastModified: file.lastModified || 0 }
+            );
+            var dt = new DataTransfer();
+            dt.items.add(named);
+            fileInput.files = dt.files;
+            // React/Ember listeners need a bubbling event; a bare
+            // new Event('change') does not reach delegated handlers.
+            fileInput.dispatchEvent(new Event('input', { bubbles: true }));
+            fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }).catch(function(err) {
+            console.warn('[Tabburrito] paste-image failed', err);
+        });
+    }, true);
+
+    console.log('[Tabburrito] LinkedIn paste-image active');
 })();
 "#;
 
@@ -1281,6 +1456,19 @@ impl WebviewState {
         self.hidden_at.lock().unwrap().remove(service_id);
     }
 
+    /// The service currently on screen. A loaded service is visible exactly
+    /// when it has no `hidden_at` timestamp.
+    fn visible_service(&self) -> Option<String> {
+        let hidden = self.hidden_at.lock().unwrap();
+        let loaded = self.loaded.lock().unwrap();
+        SERVICES
+            .iter()
+            .find(|svc| {
+                loaded.get(svc.id).copied().unwrap_or(false) && !hidden.contains_key(svc.id)
+            })
+            .map(|svc| svc.id.to_string())
+    }
+
     fn hidden_for(&self, service_id: &str) -> Option<Duration> {
         self.hidden_at
             .lock()
@@ -1454,6 +1642,51 @@ fn service_bounds(window: &tauri::Window) -> (LogicalPosition<f64>, LogicalSize<
     )
 }
 
+/// Shows/hides the settings panel.
+///
+/// Settings live in their own webview rather than in the sidebar because the
+/// sidebar is a fixed 56px-wide strip — far too narrow for a form. This one
+/// covers the content area, like a modal over the active service.
+#[tauri::command]
+async fn toggle_settings(app: tauri::AppHandle, show: bool) -> Result<(), String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    if let Some(wv) = app.get_webview("settings") {
+        if show {
+            let (position, size) = service_bounds(&window);
+            let _ = wv.set_position(position);
+            let _ = wv.set_size(size);
+            wv.show().map_err(|e| e.to_string())?;
+            wv.set_focus().map_err(|e| e.to_string())?;
+        } else {
+            wv.hide().map_err(|e| e.to_string())?;
+            // Return focus to the service the user was on.
+            if let Some(active) = app.state::<WebviewState>().visible_service() {
+                if let Some(svc_wv) = app.get_webview(&active) {
+                    let _ = svc_wv.set_focus();
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    if !show {
+        return Ok(());
+    }
+
+    let (position, size) = service_bounds(&window);
+    let builder = WebviewBuilder::new("settings", WebviewUrl::App("settings.html".into()))
+        .data_directory(shell_webview_data_dir())
+        .auto_resize();
+    let wv = window
+        .add_child(builder, position, size)
+        .map_err(|e| e.to_string())?;
+    wv.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> Result<(), String> {
     if app.get_webview(service.id).is_some() {
         return Ok(());
@@ -1477,6 +1710,13 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
     if service.id == "whatsapp" || service.id == "messenger" {
         init_scripts.push('\n');
         init_scripts.push_str(UNREAD_BOOTSTRAP_JS);
+    }
+    if service.id == "linkedin" {
+        // Injected at document start (not on_page_load) so the paste handler is
+        // live before the user can reach the composer, and survives LinkedIn's
+        // client-side navigation without a full page load.
+        init_scripts.push('\n');
+        init_scripts.push_str(LINKEDIN_PASTE_IMAGE_JS);
     }
     let mut builder = WebviewBuilder::new(service.id, WebviewUrl::External(url))
         .user_agent(CHROME_UA)
@@ -1776,6 +2016,271 @@ async fn set_unload_seconds(app: tauri::AppHandle, seconds: u64) -> Result<(), S
     Ok(())
 }
 
+// --- Updates ---------------------------------------------------------------
+//
+// The update mechanism itself lives in install\Update-Tabburrito.ps1 (git
+// pull + cargo build + reinstall), driven by a scheduled task. These commands
+// exist so the app can SHOW that state and trigger it on demand — previously
+// the whole feature was invisible from inside the app.
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateStatusPayload {
+    /// Version recorded on disk by the installer. After a successful update
+    /// but BEFORE a restart this is the NEW version while `running_version`
+    /// is still the old one — the UI must not conflate the two.
+    version: String,
+    /// Version compiled into the process that is actually executing.
+    running_version: String,
+    /// True when an update has been installed but not yet restarted into.
+    restart_pending: bool,
+    installed_commit: Option<String>,
+    auto_update_enabled: bool,
+    last_checked: Option<String>,
+    last_result: Option<String>,
+}
+
+fn repo_root_for_updates() -> Option<PathBuf> {
+    // The updater is a script in the source repo; the installed exe lives
+    // elsewhere, so recover the repo path from the install manifest.
+    let manifest = install_dir().join("install-manifest.json");
+    let raw = fs::read_to_string(&manifest).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let repo = parsed.get("repoRoot")?.as_str()?;
+    let path = PathBuf::from(repo);
+    if path.join("install").join("Update-Tabburrito.ps1").is_file() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn install_dir() -> PathBuf {
+    dirs_local_appdata()
+        .join("Programs")
+        .join("Tabburrito")
+}
+
+/// Modification time of the installed exe as observed at startup.
+///
+/// Captured once at launch so a later update — which replaces the exe while
+/// this process keeps running the OLD code — can be detected by comparing
+/// against the current mtime.
+static EXE_MTIME_AT_LAUNCH: OnceLock<Option<SystemTime>> = OnceLock::new();
+
+fn installed_exe_mtime() -> Option<SystemTime> {
+    fs::metadata(install_dir().join("tabburrito.exe"))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+fn record_exe_mtime_at_launch() {
+    let _ = EXE_MTIME_AT_LAUNCH.set(installed_exe_mtime());
+}
+
+/// True when the installed exe has been replaced since this process started,
+/// i.e. an update landed and a restart is required to actually run it.
+fn exe_updated_since_launch() -> bool {
+    let Some(baseline) = EXE_MTIME_AT_LAUNCH.get() else {
+        return false;
+    };
+    match (baseline, installed_exe_mtime()) {
+        (Some(started), Some(now)) => now > *started,
+        // No baseline (dev build outside the install dir) — nothing to claim.
+        _ => false,
+    }
+}
+
+fn dirs_local_appdata() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Whether the auto-update scheduled task exists AND is enabled.
+///
+/// `schtasks /Query` exits 0 for a task that exists but is DISABLED (verified
+/// 2026-08-05: disabling the task and re-querying still returns exit code 0),
+/// so existence alone would report "on" for a task Windows will never run.
+/// Parse the reported status instead.
+fn auto_update_task_enabled() -> bool {
+    let mut cmd = std::process::Command::new("schtasks");
+    cmd.args(["/Query", "/TN", AUTO_UPDATE_TASK_NAME, "/FO", "LIST"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let Ok(out) = cmd.output() else { return false };
+    if !out.status.success() {
+        return false; // task does not exist
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Localized Windows prints a translated status, so treat "not disabled"
+    // as enabled rather than requiring the literal word "Ready".
+    text.lines()
+        .find(|l| l.trim_start().to_ascii_lowercase().starts_with("status:"))
+        .map(|l| !l.to_ascii_lowercase().contains("disabled"))
+        .unwrap_or(false)
+}
+
+const AUTO_UPDATE_TASK_NAME: &str = "Tabburrito Auto-Update";
+
+#[tauri::command]
+async fn get_update_status(_app: tauri::AppHandle) -> Result<UpdateStatusPayload, String> {
+    let manifest_path = install_dir().join("install-manifest.json");
+    let (version, installed_commit) = match fs::read_to_string(&manifest_path) {
+        Ok(raw) => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            (
+                parsed
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(env!("CARGO_PKG_VERSION"))
+                    .to_string(),
+                parsed
+                    .get("sourceCommit")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().take(7).collect()),
+            )
+        }
+        // Not installed via the installer (e.g. running a dev build).
+        Err(_) => (env!("CARGO_PKG_VERSION").to_string(), None),
+    };
+
+    // An update swaps the exe on disk while this process keeps running the
+    // old code, so reporting the manifest version alone would claim we are
+    // already on the new build. Compare the installed exe against the running
+    // one: a different path, or an exe modified after this process started,
+    // means a restart is needed. (Codex review 2026-08-05.)
+    let running_version = env!("CARGO_PKG_VERSION").to_string();
+    let restart_pending = exe_updated_since_launch();
+
+    // Surface the tail of the updater log so the UI can show what happened.
+    let log_path = dirs_local_appdata()
+        .join("TabburritoBuild")
+        .join("update.log");
+    let (last_checked, last_result) = match fs::read_to_string(&log_path) {
+        Ok(text) => {
+            let last = text.lines().filter(|l| !l.trim().is_empty()).next_back();
+            match last {
+                Some(line) => {
+                    // Format: "[YYYY-MM-DD HH:MM:SS] message"
+                    let ts = line
+                        .strip_prefix('[')
+                        .and_then(|r| r.split_once(']'))
+                        .map(|(t, _)| t.to_string());
+                    let msg = line
+                        .split_once("] ")
+                        .map(|(_, m)| m.to_string())
+                        .unwrap_or_else(|| line.to_string());
+                    (ts, Some(msg))
+                }
+                None => (None, None),
+            }
+        }
+        Err(_) => (None, None),
+    };
+
+    Ok(UpdateStatusPayload {
+        version,
+        running_version,
+        restart_pending,
+        installed_commit,
+        auto_update_enabled: auto_update_task_enabled(),
+        last_checked,
+        last_result,
+    })
+}
+
+#[tauri::command]
+async fn set_auto_update_enabled(enabled: bool) -> Result<(), String> {
+    let repo = repo_root_for_updates()
+        .ok_or("Update scripts not found. Reinstall with install\\Install-Tabburrito.ps1.")?;
+    let script = repo.join("install").join("Register-AutoUpdate.ps1");
+
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    cmd.arg(&script);
+    if !enabled {
+        cmd.arg("-Remove");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            "Failed to change the auto-update task.".to_string()
+        } else {
+            err
+        });
+    }
+
+    // Do not trust exit code alone: a PowerShell script can emit a
+    // non-terminating error and still exit 0, which would let the UI report
+    // a state change that never happened. Verify against the actual task.
+    // (Codex review 2026-08-05.)
+    if auto_update_task_enabled() != enabled {
+        return Err(format!(
+            "The scheduled task is still {}. Run install\\Register-AutoUpdate.ps1 manually to see why.",
+            if enabled { "absent or disabled" } else { "enabled" }
+        ));
+    }
+    Ok(())
+}
+
+/// Runs the updater. Returns its log output. This can take minutes (it
+/// rebuilds from source), so the UI must treat it as a long operation.
+#[tauri::command]
+async fn run_update_check(force: bool) -> Result<String, String> {
+    let repo = repo_root_for_updates()
+        .ok_or("Update scripts not found. Reinstall with install\\Install-Tabburrito.ps1.")?;
+    let script = repo.join("install").join("Update-Tabburrito.ps1");
+
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    cmd.arg(&script);
+    if force {
+        cmd.arg("-Force");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if out.status.success() {
+        Ok(if stdout.is_empty() {
+            "Update check finished.".to_string()
+        } else {
+            stdout
+        })
+    } else {
+        Err(if stderr.is_empty() { stdout } else { stderr })
+    }
+}
+
 #[tauri::command]
 async fn set_service_url(app: tauri::AppHandle, service_id: String, url: String) -> Result<(), String> {
     if service_by_id(&service_id).is_none() {
@@ -1903,10 +2408,16 @@ fn main() {
             set_notify_service,
             get_autostart_enabled,
             set_autostart_enabled,
+            get_update_status,
+            set_auto_update_enabled,
+            run_update_check,
+            toggle_settings,
         ])
         .setup(|app| {
             // Must run before any webview opens the data folder.
             migrate_legacy_data_dir();
+            // Baseline for detecting an update that landed while we run.
+            record_exe_mtime_at_launch();
 
             let window = tauri::window::WindowBuilder::new(app, "main")
                 .title("Tabburrito")

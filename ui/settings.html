@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Tabburrito Settings</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body class="dark">
+  <div id="settings-panel">
+    <header class="settings-header">
+      <h1>Settings</h1>
+      <button id="settings-close" class="icon-btn" title="Close (Esc)" aria-label="Close settings">&times;</button>
+    </header>
+
+    <div class="settings-body">
+
+      <section class="settings-section">
+        <h2>Appearance</h2>
+        <div class="row">
+          <span class="row-label">Theme<small>Sidebar and app chrome</small></span>
+          <select id="set-theme">
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2>Performance &amp; sleep</h2>
+        <div class="row">
+          <span class="row-label">Sleep inactive tabs after<small id="sleep-note">Background tabs unload to free memory</small></span>
+          <select id="set-unload">
+            <option value="60">1 minute</option>
+            <option value="180">3 minutes</option>
+            <option value="300">5 minutes</option>
+            <option value="600">10 minutes</option>
+            <option value="1800">30 minutes</option>
+            <option value="3600">1 hour</option>
+          </select>
+        </div>
+        <div class="row">
+          <span class="row-label">Resource mode<small>Preset for sleep timing and notifications</small></span>
+          <select id="set-resource-mode">
+            <option value="lean">Lean — least memory</option>
+            <option value="balanced">Balanced</option>
+            <option value="instant">Instant — keep tabs warm</option>
+          </select>
+        </div>
+        <p class="note">WhatsApp and Messenger stay loaded while notifications are on, so unread counts keep working.</p>
+      </section>
+
+      <section class="settings-section">
+        <h2>Notifications</h2>
+        <div class="row">
+          <span class="row-label">Mute all audio<small>Silences every tab</small></span>
+          <label class="switch"><input type="checkbox" id="set-muted"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <span class="row-label">Do not disturb<small id="dnd-note">Suppresses desktop popups</small></span>
+          <select id="set-dnd">
+            <option value="0">Off</option>
+            <option value="15">15 minutes</option>
+            <option value="60">1 hour</option>
+            <option value="eod">Until end of day</option>
+          </select>
+        </div>
+        <div class="subsection">
+          <div class="subsection-title">Per-tab notifications</div>
+          <div id="notify-rows"></div>
+          <p class="note">Off — nothing · Badge — unread count only · Full — badge and desktop popup</p>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2>LinkedIn</h2>
+        <div class="row">
+          <span class="row-label">Feed sort<small>Re-applied on every load</small></span>
+          <select id="set-linkedin-sort">
+            <option value="recent">Recent</option>
+            <option value="top">Top</option>
+          </select>
+        </div>
+        <div class="row">
+          <span class="row-label">Block promoted posts<small>Hides ads and suggested-content modules</small></span>
+          <label class="switch"><input type="checkbox" id="set-linkedin-adblock"><span class="slider"></span></label>
+        </div>
+        <p class="note good">Paste images directly into a post or comment with Ctrl+V — Tabburrito attaches the screenshot for you, no saving to disk.</p>
+      </section>
+
+      <section class="settings-section">
+        <h2>Startup</h2>
+        <div class="row">
+          <span class="row-label">Start Tabburrito at login<small>Launches automatically when you sign in</small></span>
+          <label class="switch"><input type="checkbox" id="set-autostart"><span class="slider"></span></label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2>Updates</h2>
+        <div class="row">
+          <span class="row-label">Installed version<small id="update-meta">Reading…</small></span>
+          <span id="update-version" class="value-badge">—</span>
+        </div>
+        <div class="row">
+          <span class="row-label">Check automatically<small>Daily, and 5 minutes after login</small></span>
+          <label class="switch"><input type="checkbox" id="set-auto-update"><span class="slider"></span></label>
+        </div>
+        <div class="row">
+          <span class="row-label">Last check<small id="update-last">Never</small></span>
+          <button id="btn-check-update" class="btn">Check now</button>
+        </div>
+        <p class="note" id="update-status"></p>
+        <p class="note dim">Updates rebuild from source, which can take a few minutes. Your logins and sessions are never touched.</p>
+      </section>
+
+    </div>
+  </div>
+  <script src="settings.js"></script>
+</body>
+</html>

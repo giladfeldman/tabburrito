@@ -87,11 +87,14 @@ $version = (Get-Item -LiteralPath $TargetExe).VersionInfo.FileVersion
 if (-not $version) { $version = '0.1.0' }
 
 # Record what is installed so the updater can compare against the remote build.
+# repoRoot lets the running app locate Update-Tabburrito.ps1 for the in-app
+# "Check for updates" button — the installed exe lives outside the repo.
 $manifest = [ordered]@{
     version     = $version
     installedAt = (Get-Date).ToString('o')
     exePath     = $TargetExe
     dataDir     = $DataDir
+    repoRoot    = $RepoRoot
     sourceCommit = (& git -C $RepoRoot rev-parse HEAD 2>$null)
 }
 $manifest | ConvertTo-Json | Set-Content -Path (Join-Path $InstallDir 'install-manifest.json') -Encoding utf8

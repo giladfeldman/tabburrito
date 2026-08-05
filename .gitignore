@@ -50,6 +50,10 @@ archive/
 # transcripts were verified on 2026-08-04 to contain live `sk-` API tokens.
 recovery-manifests/
 
+# Tool run output: per-run folders holding Dropbox cleanup workbooks and
+# inspection dumps. These enumerate personal file paths and media inventories.
+outputs/
+
 # AI assistant state/config anywhere in the tree - these carry auth tokens,
 # session transcripts, and machine-specific paths.
 .codex/

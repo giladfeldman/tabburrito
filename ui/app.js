@@ -373,10 +373,101 @@ async function initUnreadListener() {
   } catch {}
 }
 
+// --- Settings panel bridge -------------------------------------------------
+//
+// The settings panel is a separate webview with its own localStorage, so it
+// cannot read or write this one's state. The sidebar stays the owner of
+// sidebar state: it publishes a snapshot and applies changes coming back.
+
+function settingsSnapshot() {
+  return {
+    dark: isDark,
+    muted: isMuted,
+    unloadSeconds,
+    resourceMode,
+    dndUntil,
+    notifyModes,
+  };
+}
+
+function publishSettingsState() {
+  if (!window.__TAURI__?.event?.emit) return;
+  window.__TAURI__.event.emit('tb-settings-state', settingsSnapshot());
+}
+
+function applySettingsChange(change) {
+  const { key, value } = change || {};
+  switch (key) {
+    case 'dark':
+      isDark = !!value;
+      document.body.classList.toggle('dark', isDark);
+      document.body.classList.toggle('light', !isDark);
+      break;
+    case 'muted':
+      // Route through toggleMute's sibling logic so the button icon updates.
+      if (isMuted !== !!value) toggleMute();
+      return; // toggleMute already saved and synced
+    case 'unloadSeconds':
+      unloadSeconds = Number(value) || unloadSeconds;
+      updateMemoryButton();
+      break;
+    case 'resourceMode':
+      // applyResourceMode saves, syncs Rust, and rewrites notify modes.
+      applyResourceMode(value);
+      publishSettingsState();
+      return;
+    case 'dndUntil':
+      dndUntil = Number(value) || 0;
+      updateDndButton();
+      break;
+    case 'notifyMode': {
+      const id = change.serviceId;
+      if (!id) return;
+      notifyModes[id] = value;
+      if (value === 'off') {
+        notifyServices = notifyServices.filter(s => s !== id);
+        unreadCounts[id] = 0;
+      } else if (!notifyServices.includes(id)) {
+        notifyServices.push(id);
+      }
+      updateNotifyIndicators();
+      syncNotifyServicesToRust();
+      break;
+    }
+    default:
+      return; // linkedinSort / linkedinAdblock are owned by the URL bar
+  }
+  saveState();
+}
+
+async function openSettings() {
+  if (!window.__TAURI__) return;
+  await window.__TAURI__.core.invoke('toggle_settings', { show: true }).catch(() => {});
+  // settings.js init() runs only once, when the webview is first created.
+  // On every SUBSEQUENT open the panel is merely re-shown, so tell it to
+  // re-sync — otherwise it would display whatever it held when last closed
+  // (including a stale autostart checkbox and stale update status).
+  if (window.__TAURI__.event?.emit) {
+    window.__TAURI__.event.emit('tb-settings-shown', {});
+  }
+  publishSettingsState();
+}
+
+async function initSettingsBridge() {
+  if (!window.__TAURI__?.event?.listen) return;
+  try {
+    await window.__TAURI__.event.listen('tb-settings-request-state', publishSettingsState);
+    await window.__TAURI__.event.listen('tb-settings-change', (event) => {
+      applySettingsChange(event.payload || {});
+    });
+  } catch {}
+}
+
 function paletteCommands() {
   const svcCmds = SERVICES.map(s => ({ label: `Switch: ${s.name}`, run: () => showService(s.id) }));
   return [
     ...svcCmds,
+    { label: 'Open settings', run: openSettings },
     { label: 'Toggle mute', run: toggleMute },
     { label: 'Refresh current', run: refreshCurrent },
     { label: 'Cycle memory preset', run: cycleMemoryPreset },
@@ -434,6 +525,7 @@ document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key.toLowerCase() === 'd') { e.preventDefault(); toggleDark(); }
   if (e.ctrlKey && e.key.toLowerCase() === 'r') { e.preventDefault(); refreshCurrent(); }
   if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+  if (e.ctrlKey && e.key === ',') { e.preventDefault(); openSettings(); }
   if (e.key === 'Escape') closePalette();
 });
 
@@ -453,12 +545,14 @@ function init() {
   document.getElementById('btn-autostart').addEventListener('click', toggleAutostart);
   document.getElementById('btn-memory').addEventListener('click', cycleMemoryPreset);
   document.getElementById('btn-dnd').addEventListener('click', cycleDnd);
+  document.getElementById('btn-settings').addEventListener('click', openSettings);
   document.getElementById('palette-input').addEventListener('input', (e) => renderPalette(e.target.value || ''));
 
   updateMemoryButton();
   updateDndButton();
   initAutostart();
   initUnreadListener();
+  initSettingsBridge();
   syncNotifyServicesToRust();
 
   if (window.__TAURI__) {
