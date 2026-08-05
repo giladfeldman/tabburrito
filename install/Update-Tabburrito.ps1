@@ -83,14 +83,30 @@ try {
         exit 0
     }
 
-    $needsUpdate = ($localHead -ne $remoteHead) -or $Force -or -not (Test-Path -LiteralPath $TargetExe)
+    # Compare by ANCESTRY, not just inequality. Hashes also differ when the
+    # local branch is AHEAD of the remote (unpushed work), and treating that
+    # as "new version available" made the updater try to pull nonexistent
+    # commits and then fail on unrelated dirty files. Only a remote head that
+    # is NOT already an ancestor of local means there is something to pull.
+    & git merge-base --is-ancestor $remoteHead $localHead 2>$null
+    $remoteAlreadyIncluded = ($LASTEXITCODE -eq 0)
+    $hasNewCommits = -not $remoteAlreadyIncluded
+
+    $needsUpdate = $hasNewCommits -or $Force -or -not (Test-Path -LiteralPath $TargetExe)
 
     if (-not $needsUpdate) {
-        Write-Log 'Already up to date.' 'Green'
+        if ($localHead -ne $remoteHead) {
+            # Ahead of origin: nothing to fetch, and saying "up to date"
+            # would hide unpushed work from the user.
+            $ahead = (& git rev-list --count "$upstream..HEAD" 2>$null)
+            Write-Log "Up to date (local is $ahead commit(s) ahead of $upstream - push to publish)." 'Green'
+        } else {
+            Write-Log 'Already up to date.' 'Green'
+        }
         exit 0
     }
 
-    if ($localHead -ne $remoteHead) {
+    if ($hasNewCommits) {
         Write-Log "New version available: $($remoteHead.Substring(0,7))" 'Yellow'
 
         # Refuse to clobber uncommitted local work.
