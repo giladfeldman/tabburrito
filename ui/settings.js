@@ -33,6 +33,7 @@ let state = {
   resourceMode: 'balanced',
   dndUntil: 0,
   notifyModes: {},
+  serviceMutes: {},
   linkedinSort: 'recent',
   linkedinAdblock: false,
 };
@@ -88,6 +89,47 @@ function renderNotifyRows() {
   });
 }
 
+function renderMuteRows() {
+  const host = $('mute-rows');
+  if (!host) return;
+  host.innerHTML = '';
+  SERVICES.forEach((svc) => {
+    const row = document.createElement('div');
+    row.className = 'notify-row';
+
+    const name = document.createElement('span');
+    name.className = 'svc-name';
+    name.textContent = svc.name;
+    // The master switch wins, so show these as forced-on and disabled
+    // rather than letting the row imply a per-tab setting is in effect.
+    if (state.muted) name.style.opacity = '0.6';
+    row.appendChild(name);
+
+    const label = document.createElement('label');
+    label.className = 'switch';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = state.muted || !!state.serviceMutes[svc.id];
+    input.disabled = state.muted;
+    input.addEventListener('change', async () => {
+      const want = input.checked;
+      try {
+        await invoke('set_service_muted', { serviceId: svc.id, muted: want });
+        state.serviceMutes[svc.id] = want;
+        emit('tb-settings-change', { key: 'serviceMute', serviceId: svc.id, value: want });
+      } catch {
+        input.checked = !want; // did not take
+      }
+    });
+    const slider = document.createElement('span');
+    slider.className = 'slider';
+    label.appendChild(input);
+    label.appendChild(slider);
+    row.appendChild(label);
+    host.appendChild(row);
+  });
+}
+
 function dndSelectValue() {
   if (!state.dndUntil || state.dndUntil <= Date.now()) return '0';
   const mins = Math.round((state.dndUntil - Date.now()) / 60000);
@@ -128,6 +170,7 @@ function renderAll() {
   $('set-linkedin-adblock').checked = state.linkedinAdblock;
   updateDndNote();
   renderNotifyRows();
+  renderMuteRows();
 }
 
 // --- Update section --------------------------------------------------------
@@ -251,6 +294,9 @@ function init() {
 
   $('set-muted').addEventListener('change', (e) => {
     state.muted = e.target.checked;
+    // Per-tab switches are overridden while the master is on, so redraw them
+    // as forced-on/disabled instead of showing a setting that has no effect.
+    renderMuteRows();
     invoke('set_muted', { muted: state.muted }).catch(() => {});
     emit('tb-settings-change', { key: 'muted', value: state.muted });
   });
@@ -322,6 +368,12 @@ function init() {
 function refreshAsyncState() {
   invoke('get_autostart_enabled')
     .then((enabled) => { $('set-autostart').checked = !!enabled; })
+    .catch(() => {});
+  // Per-service mutes live in Rust (no webview owns them), so read them back
+  // rather than waiting for a tb-settings-state broadcast that never carries
+  // them.
+  invoke('get_service_mutes')
+    .then((mutes) => { state.serviceMutes = mutes || {}; renderMuteRows(); })
     .catch(() => {});
   loadUpdateStatus();
 }

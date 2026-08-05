@@ -434,6 +434,11 @@ function applySettingsChange(change) {
       syncNotifyServicesToRust();
       break;
     }
+    case 'serviceMute':
+      // Per-service mutes live in Rust, applied by the settings panel
+      // directly. Nothing to mirror here — just don't fall through to
+      // saveState() with no change.
+      return;
     default:
       return; // linkedinSort / linkedinAdblock are owned by the URL bar
   }

@@ -97,7 +97,13 @@ $manifest = [ordered]@{
     repoRoot    = $RepoRoot
     sourceCommit = (& git -C $RepoRoot rev-parse HEAD 2>$null)
 }
-$manifest | ConvertTo-Json | Set-Content -Path (Join-Path $InstallDir 'install-manifest.json') -Encoding utf8
+# Write WITHOUT a BOM. Windows PowerShell 5.1's `-Encoding utf8` emits a UTF-8
+# BOM, and serde_json (which the app uses to read this file) rejects a leading
+# BOM as a syntax error - that broke the in-app updater on 2026-08-05.
+[System.IO.File]::WriteAllText(
+    (Join-Path $InstallDir 'install-manifest.json'),
+    ($manifest | ConvertTo-Json),
+    (New-Object System.Text.UTF8Encoding $false))
 
 # --- Shortcuts -------------------------------------------------------------
 if (-not $NoShortcuts) {

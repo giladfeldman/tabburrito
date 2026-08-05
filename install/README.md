@@ -90,6 +90,17 @@ powershell -ExecutionPolicy Bypass -File .\install\Backup-TabburritoSessions.ps1
 Restore moves the current folder aside as `...replaced-<timestamp>` before
 overwriting, so a restore is itself reversible.
 
+### Automatic weekly backups
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install\Register-SessionBackup.ps1
+```
+
+Runs weekly (Sunday 13:00 by default; `-Day`/`-At` to change, `-Remove` to
+unregister). The task passes `-SkipIfRunning`, so a week where Tabburrito
+happens to be open is **skipped and exits 0** rather than reporting a failure
+or capturing a torn snapshot. Manual runs still refuse outright.
+
 ## Uninstall
 
 ```powershell

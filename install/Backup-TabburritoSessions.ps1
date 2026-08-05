@@ -24,6 +24,11 @@
 .PARAMETER Force
     Back up even while Tabburrito is running (may produce a torn snapshot).
 
+.PARAMETER SkipIfRunning
+    Exit 0 without backing up when Tabburrito is running, instead of erroring.
+    For the weekly scheduled task: a skipped backup is a normal outcome, and
+    reporting it as a failure every week would train the user to ignore it.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\install\Backup-TabburritoSessions.ps1
 
@@ -34,7 +39,8 @@
 param(
     [switch]$Restore,
     [string]$Path,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$SkipIfRunning
 )
 
 Set-StrictMode -Version Latest
@@ -80,6 +86,14 @@ if (-not (Test-Path -LiteralPath $DataDir)) {
 }
 
 if ((Test-AppRunning) -and -not $Force) {
+    if ($SkipIfRunning) {
+        # Unattended path: skipping is the CORRECT outcome, not a failure.
+        # Erroring here would make the weekly scheduled task report a failure
+        # every week the app happened to be open, training the user to ignore
+        # it - and a torn snapshot is worse than a skipped one.
+        Write-Host 'Tabburrito is running - skipping this scheduled backup.' -ForegroundColor Yellow
+        exit 0
+    }
     Write-Error 'Tabburrito is running - a backup taken now could capture a torn database. Close it and rerun, or pass -Force to accept that risk.'
 }
 

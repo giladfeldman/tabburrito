@@ -469,25 +469,42 @@ const LINKEDIN_ADBLOCK_JS: &str = r#"
 })();
 "#;
 
-// LinkedIn clipboard-image paste.
+// Clipboard paste helpers, injected into services whose composers need them.
 //
-// LinkedIn's composer has no `paste` handler for image blobs (unlike X and
-// Bluesky), so a screenshot must be saved to disk and re-selected through the
-// file picker. This bridges that gap: it takes the image off the clipboard,
-// wraps it in a File, and hands it to LinkedIn's OWN hidden
-// <input type="file"> via a synthetic DataTransfer. That is the same code path
-// the file picker drives, so previews, cropping, and alt-text all behave
-// normally — we are not reimplementing the uploader, just feeding it.
+// Two features share one paste listener:
 //
-// The known Chrome extension for this (PEZ/linkedin-paste-image) requires the
-// user to open the image dialog and dismiss it first, because the file input
-// is not mounted until the media flow opens. We instead click the composer's
-// image button ourselves and wait for the input to appear, so a plain Ctrl+V
-// is enough.
+// 1. IMAGE PASTE. LinkedIn's composer has no `paste` handler for image blobs
+//    (unlike X and Bluesky), so a screenshot must be saved to disk and
+//    re-selected through the file picker. This takes the image off the
+//    clipboard, wraps it in a File, and hands it to the site's OWN hidden
+//    <input type="file"> via a synthetic DataTransfer. That is the same code
+//    path the file picker drives, so previews, cropping, and alt-text behave
+//    normally — we are not reimplementing the uploader, just feeding it.
+//
+//    The known Chrome extension for this (PEZ/linkedin-paste-image) requires
+//    the user to open the image dialog and dismiss it first, because the file
+//    input is not mounted until the media flow opens. We click the composer's
+//    image button ourselves and wait for the input, so a plain Ctrl+V works.
+//
+// 2. PLAIN-TEXT PASTE (Ctrl+Shift+V). Pasting from Word/Docs/a web page drags
+//    fonts, colours and link markup into the composer. Ctrl+Shift+V inserts
+//    the clipboard's text/plain instead. Browsers do not route Ctrl+Shift+V to
+//    the page at all (it is a browser-level shortcut), so the flag is armed on
+//    keydown and consumed by the paste that immediately follows.
 //
 // DOM-volatility policy matches LINKEDIN_ADBLOCK_JS: match on semantic
 // anchors (aria-label, accept, contenteditable) and never on hashed classes.
-const LINKEDIN_PASTE_IMAGE_JS: &str = r#"
+/// Services that get the paste helpers. Calendar is excluded: its composer is
+/// a plain event form with no media attach flow.
+const PASTE_HELPER_SERVICES: &[&str] = &["linkedin", "whatsapp", "messenger", "bluesky"];
+
+/// Services whose composer ALREADY accepts a pasted image. These get the
+/// plain-text paste only — intercepting their image paste would attach the
+/// file twice. WhatsApp Web's native support verified 2026-08-05; Bluesky
+/// handles image paste natively like X.
+const NATIVE_IMAGE_PASTE_SERVICES: &[&str] = &["whatsapp", "bluesky"];
+
+const PASTE_HELPERS_JS: &str = r#"
 (function() {
     'use strict';
     if (window.__tbPasteImageBootstrapped) return;
@@ -497,8 +514,13 @@ const LINKEDIN_PASTE_IMAGE_JS: &str = r#"
         'button[aria-label*="add media" i]',
         'button[aria-label*="add a photo" i]',
         'button[aria-label*="add photo" i]',
+        'button[aria-label*="attach" i]',
+        'button[aria-label*="photos & videos" i]',
         'button[aria-label*="photo" i]',
-        'button[aria-label*="image" i]'
+        'button[aria-label*="image" i]',
+        'span[data-icon="plus-rounded"]',
+        'span[data-icon="attach-menu-plus"]',
+        'span[data-icon="clip"]'
     ];
 
     function isVisible(el) {
@@ -587,22 +609,76 @@ const LINKEDIN_PASTE_IMAGE_JS: &str = r#"
         return 'png';
     }
 
+    // WhatsApp and Messenger use contenteditable composers too, but not
+    // always inside a form/dialog, so accept a bare editable element as well.
     function inComposer(target) {
         if (!target || !target.closest) return false;
-        return !!target.closest('div[role="textbox"][contenteditable="true"], div[role="dialog"], form');
+        if (target.closest('div[role="textbox"][contenteditable="true"], div[role="dialog"], form')) {
+            return true;
+        }
+        var editable = target.closest('[contenteditable="true"]');
+        if (editable) return true;
+        // A plain <textarea> composer (some Messenger surfaces).
+        return !!(target.tagName === 'TEXTAREA');
+    }
+
+    // --- Plain-text paste (Ctrl+Shift+V) ----------------------------------
+    // Ctrl+Shift+V never reaches the page as a paste event (the browser owns
+    // that chord and pastes rich content), so arm a flag on keydown and let
+    // the paste handler below consume it.
+    var plainTextArmed = false;
+    document.addEventListener('keydown', function(e) {
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
+            plainTextArmed = true;
+            // The flag must not survive to some later, unrelated paste.
+            setTimeout(function() { plainTextArmed = false; }, 1000);
+        }
+    }, true);
+
+    function insertPlainText(text) {
+        if (!text) return false;
+        // execCommand is deprecated but remains the only reliable way to
+        // insert into a contenteditable while preserving the site's own
+        // undo stack and input events. document.execCommand('insertText')
+        // fires beforeinput/input, which React composers listen for.
+        try {
+            return document.execCommand('insertText', false, text);
+        } catch (err) {
+            return false;
+        }
     }
 
     document.addEventListener('paste', function(event) {
+        // Plain-text paste takes priority: the user explicitly asked to strip
+        // formatting, so do not divert into the image path.
+        if (plainTextArmed) {
+            plainTextArmed = false;
+            if (inComposer(event.target) && event.clipboardData) {
+                var text = event.clipboardData.getData('text/plain');
+                if (text && insertPlainText(text)) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    return;
+                }
+            }
+        }
+
         var item = imageItemFrom(event.clipboardData);
         if (!item) return;
         // Only hijack pastes aimed at a composer/comment box, so pasting an
         // image into search or an unrelated field is left alone.
         if (!inComposer(event.target)) return;
 
+        // Sites that already accept pasted images (WhatsApp, Messenger)
+        // handle this themselves; intercepting would double-attach. Only
+        // step in where no image file input is reachable from the composer,
+        // which is the LinkedIn case this exists for.
+        if (window.__tbPasteImageNative) return;
+
         var file = item.getAsFile();
         if (!file) return;
 
-        // We are handling it — stop LinkedIn from inserting a stray text node.
+        // We are handling it — stop the site inserting a stray text node.
         event.preventDefault();
         event.stopPropagation();
 
@@ -1089,14 +1165,20 @@ impl AdblockState {
     }
 }
 
+/// Mute state: one global master switch plus per-service overrides.
+///
+/// A service is muted when the master is on OR that service is individually
+/// muted, so muting Messenger alone never silences Calendar and vice versa.
 struct MuteState {
     muted: Mutex<bool>,
+    per_service: Mutex<HashMap<String, bool>>,
 }
 
 impl MuteState {
     fn new() -> Self {
         Self {
             muted: Mutex::new(false),
+            per_service: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1106,6 +1188,34 @@ impl MuteState {
 
     fn set_muted(&self, muted: bool) {
         *self.muted.lock().unwrap() = muted;
+    }
+
+    /// Effective mute for one service: master OR that service's own setting.
+    fn is_service_muted(&self, service_id: &str) -> bool {
+        if self.is_muted() {
+            return true;
+        }
+        self.per_service
+            .lock()
+            .unwrap()
+            .get(service_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn set_service_muted(&self, service_id: &str, muted: bool) {
+        self.per_service
+            .lock()
+            .unwrap()
+            .insert(service_id.to_string(), muted);
+    }
+
+    fn per_service_snapshot(&self) -> HashMap<String, bool> {
+        self.per_service.lock().unwrap().clone()
+    }
+
+    fn replace_per_service(&self, map: HashMap<String, bool>) {
+        *self.per_service.lock().unwrap() = map;
     }
 }
 
@@ -1258,6 +1368,10 @@ struct PortableStatePayload {
     service_urls: HashMap<String, String>,
     linkedin_sort: String,
     notify_tracked: HashMap<String, bool>,
+    /// Per-service mute overrides. `default` so payloads exported before this
+    /// field existed still deserialize instead of failing the whole restore.
+    #[serde(default)]
+    service_mutes: HashMap<String, bool>,
 }
 
 fn parse_tb_unread_marker(title: &str) -> Option<u32> {
@@ -1300,10 +1414,12 @@ fn apply_mute_to_webview(webview: &tauri::Webview, muted: bool) {
     });
 }
 
-fn apply_mute_to_all_services(app: &tauri::AppHandle, muted: bool) {
+/// Re-applies the effective mute (master OR per-service) to every live tab.
+fn apply_mute_to_all_services(app: &tauri::AppHandle) {
+    let state = app.state::<MuteState>();
     for svc in SERVICES {
         if let Some(wv) = app.get_webview(svc.id) {
-            apply_mute_to_webview(&wv, muted);
+            apply_mute_to_webview(&wv, state.is_service_muted(svc.id));
         }
     }
 }
@@ -1363,6 +1479,22 @@ fn resolve_service_url(app: &tauri::AppHandle, svc: &Service) -> Result<url::Url
         return saved.parse().map_err(|e: url::ParseError| e.to_string());
     }
     svc.url.parse().map_err(|e: url::ParseError| e.to_string())
+}
+
+/// Whether a URL is worth remembering as "where this tab was".
+///
+/// Restoring to an auth/callback URL would drop the user mid-login on the next
+/// load, and blob:/data: URLs are not addressable at all after a reload.
+fn is_restorable_url(url: &url::Url) -> bool {
+    if url.scheme() != "https" && url.scheme() != "http" {
+        return false;
+    }
+    let path = url.path().to_ascii_lowercase();
+    const TRANSIENT: &[&str] = &[
+        "/login", "/logout", "/signin", "/sign-in", "/auth", "/oauth",
+        "/checkpoint", "/challenge", "/callback", "/x/init",
+    ];
+    !TRANSIENT.iter().any(|frag| path.contains(frag))
 }
 
 fn set_service_url_override(app: &tauri::AppHandle, service_id: &str, url: &str) {
@@ -1703,6 +1835,7 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
     let navigation_service_nav = service;
     let navigation_service_window = service;
     let app_handle_for_window = app.clone();
+    let app_handle_for_nav = app.clone();
     let service_id = service.id.to_string();
     let link_script = external_link_bootstrap_js(service.internal_hosts);
     let download_service_id = service.id.to_string();
@@ -1711,12 +1844,21 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
         init_scripts.push('\n');
         init_scripts.push_str(UNREAD_BOOTSTRAP_JS);
     }
-    if service.id == "linkedin" {
-        // Injected at document start (not on_page_load) so the paste handler is
-        // live before the user can reach the composer, and survives LinkedIn's
-        // client-side navigation without a full page load.
+    // Paste helpers: image paste where the site lacks it, and Ctrl+Shift+V
+    // plain-text paste everywhere it makes sense.
+    //
+    // Injected at document start (not on_page_load) so the handler is live
+    // before the user can reach a composer, and survives client-side
+    // navigation without a full page load.
+    if PASTE_HELPER_SERVICES.contains(&service.id) {
         init_scripts.push('\n');
-        init_scripts.push_str(LINKEDIN_PASTE_IMAGE_JS);
+        // WhatsApp Web already accepts pasted images natively (verified
+        // 2026-08-05), so intercepting there would double-attach the file.
+        // Those services get the plain-text paste only.
+        if NATIVE_IMAGE_PASTE_SERVICES.contains(&service.id) {
+            init_scripts.push_str("window.__tbPasteImageNative = true;\n");
+        }
+        init_scripts.push_str(PASTE_HELPERS_JS);
     }
     let mut builder = WebviewBuilder::new(service.id, WebviewUrl::External(url))
         .user_agent(CHROME_UA)
@@ -1825,7 +1967,20 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
                 );
             }
             // #endregion
-            handle_navigation(navigation_service_nav, &url)
+            let allowed = handle_navigation(navigation_service_nav, &url);
+            // Remember where the user actually is, so a tab that gets
+            // unloaded for memory comes back to the same place instead of
+            // resetting to the service root. Only ordinary http(s) page
+            // navigations qualify — blob:/data: and auth round-trips are not
+            // somewhere we could meaningfully return to.
+            if allowed && is_restorable_url(&url) {
+                set_service_url_override(
+                    &app_handle_for_nav,
+                    navigation_service_nav.id,
+                    url.as_str(),
+                );
+            }
+            allowed
         })
         .on_new_window(move |url, features| {
             // A genuine popup (OAuth, share dialog, etc.) carries an explicit
@@ -1874,7 +2029,7 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
     wv.hide().map_err(|e| e.to_string())?;
     app.state::<WebviewState>().set_loaded(service.id, true);
     app.state::<WebviewState>().mark_hidden(service.id);
-    apply_mute_to_webview(&wv, app.state::<MuteState>().is_muted());
+    apply_mute_to_webview(&wv, app.state::<MuteState>().is_service_muted(service.id));
     Ok(())
 }
 
@@ -1999,8 +2154,29 @@ async fn set_adblock_service(
 #[tauri::command]
 async fn set_muted(app: tauri::AppHandle, muted: bool) -> Result<(), String> {
     app.state::<MuteState>().set_muted(muted);
-    apply_mute_to_all_services(&app, muted);
+    apply_mute_to_all_services(&app);
     Ok(())
+}
+
+/// Mutes one service without touching the others or the master switch.
+#[tauri::command]
+async fn set_service_muted(
+    app: tauri::AppHandle,
+    service_id: String,
+    muted: bool,
+) -> Result<(), String> {
+    if service_by_id(&service_id).is_none() {
+        return Err("unknown service id".to_string());
+    }
+    app.state::<MuteState>()
+        .set_service_muted(&service_id, muted);
+    apply_mute_to_all_services(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_service_mutes(app: tauri::AppHandle) -> Result<HashMap<String, bool>, String> {
+    Ok(app.state::<MuteState>().per_service_snapshot())
 }
 
 #[tauri::command]
@@ -2040,12 +2216,27 @@ struct UpdateStatusPayload {
     last_result: Option<String>,
 }
 
+/// Reads the install manifest, tolerating a UTF-8 BOM.
+///
+/// Windows PowerShell 5.1's `Set-Content -Encoding utf8` writes a BOM
+/// (EF BB BF), and `serde_json::from_str` rejects it as a syntax error. That
+/// made `repo_root_for_updates()` return None, so the in-app "Check now"
+/// failed with "Update scripts not found" even though the manifest, the path,
+/// and the script were all correct — and `get_update_status` silently fell
+/// back to the compiled-in version instead of the installed one.
+/// The installer no longer writes a BOM, but manifests written before that
+/// fix still have one, so strip it on read as well.
+/// (Reproduced 2026-08-05.)
+fn read_install_manifest() -> Option<serde_json::Value> {
+    let manifest = install_dir().join("install-manifest.json");
+    let raw = fs::read_to_string(&manifest).ok()?;
+    serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()
+}
+
 fn repo_root_for_updates() -> Option<PathBuf> {
     // The updater is a script in the source repo; the installed exe lives
     // elsewhere, so recover the repo path from the install manifest.
-    let manifest = install_dir().join("install-manifest.json");
-    let raw = fs::read_to_string(&manifest).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let parsed = read_install_manifest()?;
     let repo = parsed.get("repoRoot")?.as_str()?;
     let path = PathBuf::from(repo);
     if path.join("install").join("Update-Tabburrito.ps1").is_file() {
@@ -2128,25 +2319,21 @@ const AUTO_UPDATE_TASK_NAME: &str = "Tabburrito Auto-Update";
 
 #[tauri::command]
 async fn get_update_status(_app: tauri::AppHandle) -> Result<UpdateStatusPayload, String> {
-    let manifest_path = install_dir().join("install-manifest.json");
-    let (version, installed_commit) = match fs::read_to_string(&manifest_path) {
-        Ok(raw) => {
-            let parsed: serde_json::Value =
-                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
-            (
-                parsed
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(env!("CARGO_PKG_VERSION"))
-                    .to_string(),
-                parsed
-                    .get("sourceCommit")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.chars().take(7).collect()),
-            )
-        }
-        // Not installed via the installer (e.g. running a dev build).
-        Err(_) => (env!("CARGO_PKG_VERSION").to_string(), None),
+    // Missing/unreadable manifest means this is not an installed build
+    // (e.g. running from cargo), so fall back to the compiled-in version.
+    let (version, installed_commit) = match read_install_manifest() {
+        Some(parsed) => (
+            parsed
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .to_string(),
+            parsed
+                .get("sourceCommit")
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(7).collect()),
+        ),
+        None => (env!("CARGO_PKG_VERSION").to_string(), None),
     };
 
     // An update swaps the exe on disk while this process keeps running the
@@ -2303,6 +2490,7 @@ async fn backup_portable_state(app: tauri::AppHandle) -> Result<String, String> 
         service_urls: app.state::<ServiceUrlState>().snapshot(),
         linkedin_sort: app.state::<LinkedInSortState>().get(),
         notify_tracked: app.state::<NotifyState>().tracked_snapshot(),
+        service_mutes: app.state::<MuteState>().per_service_snapshot(),
     };
     serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())
 }
@@ -2319,6 +2507,9 @@ async fn restore_portable_state(app: tauri::AppHandle, payload: String) -> Resul
             emit_unread(&app, &service_id, 0);
         }
     }
+    app.state::<MuteState>()
+        .replace_per_service(parsed.service_mutes);
+    apply_mute_to_all_services(&app);
     apply_linkedin_sort_to_webview(&app);
     Ok(())
 }
@@ -2412,6 +2603,8 @@ fn main() {
             set_auto_update_enabled,
             run_update_check,
             toggle_settings,
+            set_service_muted,
+            get_service_mutes,
         ])
         .setup(|app| {
             // Must run before any webview opens the data folder.
