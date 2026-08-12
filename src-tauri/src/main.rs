@@ -469,6 +469,310 @@ const LINKEDIN_ADBLOCK_JS: &str = r#"
 })();
 "#;
 
+// Cookie / consent banner suppressor — injected into EVERY service tab at
+// document start, in every frame (CMPs usually live in an iframe).
+//
+// WebView2 has no uBlock-style filter engine, and a static selector list is not
+// enough on its own: LinkedIn's "LinkedIn respects your privacy" bar reappears
+// on most loads no matter what was stored last time, and its wrapper classes
+// are per-build hashes. So this does two things, in order:
+//
+//   1. clicks an unambiguous reject/decline control inside a CONFIRMED consent
+//      container, so the site itself records the privacy-preserving choice;
+//   2. hides the container regardless, so it never shows even when the site
+//      ignores the click.
+//
+// Blast-radius rules — the reason this is not a one-line selector:
+//
+//   * a container only qualifies if its own text carries a cookie/consent
+//     phrase. A reject-shaped button is NOT enough on its own: Messenger
+//     message requests and LinkedIn invitations have "Decline"/"Ignore"
+//     buttons, and clicking those would silently refuse a real person.
+//   * we never hide a container that would leave the page with less than
+//     MIN_REMAINING characters of other text. That shape is a full-page
+//     consent gate (Google's "Before you continue to Google" interstitial),
+//     and hiding it leaves a blank tab instead of a working service.
+//   * we never touch a container that holds a password field — sign-in pages
+//     mention cookies in their footers.
+//   * scroll-lock is only released for containers that actually looked modal.
+//
+// DOM-volatility policy matches LINKEDIN_ADBLOCK_JS: semantic anchors only
+// (visible text, aria-label, role) plus the stable product ids of the major
+// consent platforms. No hashed class names.
+const COOKIE_CONSENT_JS: &str = r#"
+(function() {
+    'use strict';
+    if (window.__tbConsentKiller) return;
+    window.__tbConsentKiller = true;
+
+    // Stable product identifiers of the mainstream consent platforms
+    // (OneTrust, Cookiebot, Usercentrics, Didomi, Quantcast, Sourcepoint,
+    // Osano, Google Funding Choices, cookieconsent, TrustArc). These are
+    // product-level ids, not per-build hashes.
+    const CMP_SELECTOR = [
+        '#onetrust-consent-sdk', '#onetrust-banner-sdk', '.onetrust-pc-dark-filter',
+        '#CybotCookiebotDialog', '#CybotCookiebotDialogBodyUnderlay',
+        '#usercentrics-root', '#usercentrics-button',
+        '#didomi-host', '.didomi-consent-popup',
+        '.qc-cmp2-container', '.qc-cmp-cleanslate',
+        '.fc-consent-root',
+        '.osano-cm-window', '.osano-cm-dialog',
+        '[id^="sp_message_container"]',
+        '.truste_overlay', '.truste_box_overlay',
+        '.cc-window.cc-banner', '.cookie-consent-banner', '.cookie-notice-container'
+    ].join(',');
+
+    const CSS =
+        CMP_SELECTOR + ' { display: none !important; }\n' +
+        '[data-tb-consent="hidden"] { display: none !important; }';
+
+    // Lower-cased substrings that mark text as a consent PROMPT, i.e. copy that
+    // states what the site does with cookies. A mere reference to the policy
+    // ("see our Cookie Policy", "Your Privacy Choices" in a footer) is
+    // deliberately NOT here: Codex, 2026-08-12, showed that treating a mention
+    // as a prompt lets an ordinary dialog carrying that sentence plus an
+    // Accept/Decline pair be hidden and its Decline pressed.
+    const PHRASES = [
+        'respects your privacy', 'value your privacy',
+        'we use cookies', 'use cookies', 'uses cookies', 'using cookies',
+        'cookies and similar technologies', 'cookies & similar technologies',
+        'accept cookies', 'essential cookies', 'non-essential cookies',
+        'consent to the use of cookies', 'store cookies', 'place cookies'
+    ];
+
+    // "Reject", "Reject all", "Decline optional cookies", "Essential only",
+    // "Continue without accepting" (the EU-style refusal label), …
+    const REJECT_RE = /^(reject|decline|refuse|deny|disagree)\b|^(only\s+)?(strictly\s+)?(necessary|essential)\b|^no,?\s*thanks$|^continue without (accepting|agreeing)/i;
+    // "Accept", "Accept all", "Allow all", "I agree", "Got it", …
+    const ACCEPT_RE = /^(accept|allow|agree|i agree|got it|ok|okay)\b/i;
+
+    const MIN_REMAINING = 400;  // chars of other page text that must survive
+    const MAX_CLICKS = 3;       // reject clicks per document, ever
+    let clicks = 0;
+    const clickedControls = new WeakSet();
+
+    function injectCSS() {
+        if (document.getElementById('tb-consent-css')) return;
+        const root = document.head || document.documentElement;
+        if (!root) return;
+        const s = document.createElement('style');
+        s.id = 'tb-consent-css';
+        s.textContent = CSS;
+        root.appendChild(s);
+    }
+
+    function hasPhrase(text) {
+        if (!text) return false;
+        const t = text.toLowerCase();
+        for (let i = 0; i < PHRASES.length; i++) {
+            if (t.indexOf(PHRASES[i]) !== -1) return true;
+        }
+        return false;
+    }
+
+    function labelOf(el) {
+        const raw = el.getAttribute('aria-label') || el.value || el.textContent || '';
+        const txt = raw.replace(/\s+/g, ' ').trim();
+        // A consent button label is short. Anything longer is body copy that
+        // happens to sit inside a clickable wrapper.
+        return txt.length > 60 ? '' : txt;
+    }
+
+    // Find the reject control and whether an accept control exists. The pair is
+    // what identifies a consent prompt: a lone "Decline" is a social action.
+    function classify(root) {
+        let reject = null;
+        let accept = false;
+        const controls = root.querySelectorAll(
+            'button, a[role="button"], [role="button"], input[type="button"], input[type="submit"]'
+        );
+        for (let i = 0; i < controls.length; i++) {
+            const label = labelOf(controls[i]);
+            if (!label) continue;
+            if (!reject && REJECT_RE.test(label)) reject = controls[i];
+            if (!accept && ACCEPT_RE.test(label)) accept = true;
+        }
+        return { reject: reject, accept: accept };
+    }
+
+    // Elements whose own text carries consent copy. One text-node pass, same
+    // shape as the LinkedIn blocker's TreeWalker.
+    function phraseHosts() {
+        const hosts = [];
+        if (!document.body) return hosts;
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+        let node;
+        while (node = walker.nextNode()) {
+            const raw = node.textContent;
+            if (!raw || raw.length < 8 || raw.length > 600) continue;
+            if (hasPhrase(raw) && node.parentElement) hosts.push(node.parentElement);
+        }
+        return hosts;
+    }
+
+    // Climb from the consent text to the smallest ancestor that also holds the
+    // buttons, then through pure wrappers/backdrops that add no text of their
+    // own. The text-growth check is what stops the climb at the banner instead
+    // of swallowing the page (the failure mode a bare :has-text filter has).
+    function containerFor(host) {
+        let el = host;
+        let best = null;
+        for (let i = 0; i < 12 && el && el !== document.body; i++) {
+            const c = classify(el);
+            if (c.reject || c.accept) { best = el; break; }
+            el = el.parentElement;
+        }
+        if (!best) return null;
+        const baseLen = (best.textContent || '').length;
+        let up = best.parentElement;
+        for (let i = 0; i < 4 && up && up !== document.body && up !== document.documentElement; i++) {
+            if ((up.textContent || '').length > baseLen * 1.15 + 30) break;
+            best = up;
+            up = up.parentElement;
+        }
+        return best;
+    }
+
+    function safeToHide(el) {
+        if (!el || el === document.body || el === document.documentElement) return false;
+        if (el.querySelector('input[type="password"]')) return false;
+        const total = (document.body.textContent || '').length;
+        const mine = (el.textContent || '').length;
+        // A consent screen that IS the page (Google's "Before you continue")
+        // must be left alone — hiding it produces an empty tab, not a clean one.
+        if (total - mine < MIN_REMAINING) return false;
+        return true;
+    }
+
+    function looksModal(el) {
+        if (el.getAttribute('aria-modal') === 'true') return true;
+        const role = el.getAttribute('role');
+        if (role === 'dialog' || role === 'alertdialog') return true;
+        try {
+            const cs = getComputedStyle(el);
+            return cs.position === 'fixed' && el.offsetHeight >= window.innerHeight * 0.8;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Only called for a container that actually looked modal, so a service that
+    // legitimately runs an overflow:hidden shell (WhatsApp) is never touched
+    // unless a full-viewport consent dialog was just removed from it.
+    function unlockScroll() {
+        [document.documentElement, document.body].forEach(function(n) {
+            if (!n) return;
+            try {
+                if (getComputedStyle(n).overflow === 'hidden') {
+                    n.style.setProperty('overflow', 'auto', 'important');
+                }
+            } catch (e) {}
+        });
+    }
+
+    let actions = 0;  // banners hidden + reject clicks, ever
+
+    function tryReject(btn) {
+        if (!btn || clicks >= MAX_CLICKS || clickedControls.has(btn)) return;
+        clickedControls.add(btn);
+        clicks++;
+        actions++;
+        try {
+            btn.click();
+            console.log('[Tabburrito] consent: declined non-essential cookies via "' + labelOf(btn) + '"');
+        } catch (e) {}
+    }
+
+    function handle(el) {
+        if (!el || el.getAttribute('data-tb-consent') === 'hidden') return;
+        if (el.closest('[data-tb-consent="hidden"]')) return;
+        const c = classify(el);
+        if (!c.reject && !c.accept) return;
+        if (!safeToHide(el)) return;
+        // Clicking is gated on the accept/reject PAIR — never on a lone reject.
+        if (c.reject && c.accept) tryReject(c.reject);
+        const modal = looksModal(el);
+        el.setAttribute('data-tb-consent', 'hidden');
+        actions++;
+        if (modal) unlockScroll();
+    }
+
+    function sweep() {
+        injectCSS();
+        // Known CMP roots are hidden by the CSS above, which never runs
+        // unlockScroll() — so a CMP that scroll-locked the page would leave it
+        // locked with the banner invisible (Codex, 2026-08-12). Presence of a
+        // CMP root is itself the evidence that the lock came from consent UI.
+        const cmp = document.querySelectorAll(CMP_SELECTOR);
+        if (cmp.length) {
+            unlockScroll();
+            cmp.forEach(function(el) {
+                const c = classify(el);
+                if (c.reject && c.accept) tryReject(c.reject);
+            });
+        }
+        const hosts = phraseHosts();
+        for (let i = 0; i < hosts.length; i++) {
+            handle(containerFor(hosts[i]));
+        }
+    }
+
+    // Cadence. A sweep is a full text-node walk, so on a live feed (which
+    // mutates continuously) an unthrottled observer would re-walk the document
+    // several times a second. Mutation-driven sweeps are coalesced to one per
+    // MIN_GAP, and both paths back off once the page has been quiet — reset by
+    // any action or by an SPA navigation, which is when banners reappear.
+    const MIN_GAP = 2000;
+    const QUIET_GAP = 15000;
+    let timer = null;
+    let lastSweep = 0;
+    let quietRounds = 0;
+    let lastUrl = location.href;
+
+    function gap() {
+        return quietRounds >= 3 ? QUIET_GAP : MIN_GAP;
+    }
+
+    function runSweep() {
+        const before = actions;
+        lastSweep = Date.now();
+        try { sweep(); } catch (e) {}
+        if (location.href !== lastUrl) {
+            lastUrl = location.href;
+            quietRounds = 0;
+        } else {
+            quietRounds = (actions === before) ? quietRounds + 1 : 0;
+        }
+    }
+
+    function schedule() {
+        if (timer) return;
+        const wait = Math.max(250, gap() - (Date.now() - lastSweep));
+        timer = setTimeout(function() {
+            timer = null;
+            runSweep();
+        }, wait);
+    }
+
+    function heartbeat() {
+        runSweep();
+        setTimeout(heartbeat, quietRounds >= 3 ? QUIET_GAP : 5000);
+    }
+
+    function start() {
+        if (!document.body) { setTimeout(start, 50); return; }
+        new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+        runSweep();
+        // Safety net for banners injected without a body mutation we observed.
+        setTimeout(heartbeat, 5000);
+    }
+    injectCSS();
+    start();
+
+    console.log('[Tabburrito] consent-banner blocker active');
+})();
+"#;
+
 // Clipboard paste helpers, injected into services whose composers need them.
 //
 // Two features share one paste listener:
@@ -1927,6 +2231,10 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
     let link_script = external_link_bootstrap_js(service.internal_hosts);
     let download_service_id = service.id.to_string();
     let mut init_scripts = link_script;
+    // Cookie/consent banners: every service, every frame, at document start so
+    // the banner is gone before first paint instead of flashing.
+    init_scripts.push('\n');
+    init_scripts.push_str(COOKIE_CONSENT_JS);
     if service.id == "whatsapp" || service.id == "messenger" {
         init_scripts.push('\n');
         init_scripts.push_str(UNREAD_BOOTSTRAP_JS);

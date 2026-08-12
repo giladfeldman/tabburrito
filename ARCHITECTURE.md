@@ -56,10 +56,31 @@ The WebView2 shell owns:
 - refresh/open controls
 - per-service navigation
 - LinkedIn ad/noise filtering
+- cookie/consent banner suppression on every service tab
 - external-link handoff to the system default browser
 - portable WebView2 storage location
 - single-instance behavior
 - window/tray behavior where supported by Tauri
+
+### Cookie / consent banners
+
+`COOKIE_CONSENT_JS` (`src-tauri/src/main.rs`) is injected into every service
+tab at document start, in every frame. On each sweep it locates containers
+whose own text carries a cookie/consent phrase, clicks an unambiguous
+reject/decline control, then hides the container so it never shows even if the
+site ignores the click.
+
+Three guards bound the blast radius, each verified against a live LinkedIn page
+and synthetic DOMs on 2026-08-12:
+
+- a reject-shaped button is never clicked unless its container also carries
+  consent copy AND an accept control — Messenger message requests and LinkedIn
+  invitations have "Decline"/"Ignore" buttons that must not be pressed;
+- a container is never hidden if doing so leaves under 400 characters of other
+  page text. That shape is a full-page consent gate (Google's "Before you
+  continue"), and hiding it would leave a blank tab;
+- containers holding a password field are skipped, and scroll-lock is only
+  released for containers that actually looked modal.
 
 ## Firefox Lite
 
