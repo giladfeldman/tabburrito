@@ -158,3 +158,36 @@ nothing here was recoverable.
 - Build artifacts, `target/`, generated schemas, runtime profiles, cookies, login databases, and personal migration backups must not be committed.
 - Public docs should use relative paths, not developer-machine absolute paths.
 - Scripts should not reference a specific user profile, email address, or local machine path.
+
+## Testing Against The Live Sites (2026-11-04)
+
+- `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=0` (the app
+  appends its own flags) gives each WebView2 browser process its own port;
+  read it from `DevToolsActivePort` in `TabburritoWebViewData\main\EBWebView`
+  (services) or `...\shell\EBWebView` (sidebar/URL bar). Port 9222 for both
+  collides: only the first process gets it.
+- Never test messaging services from a COPY of the profile: WhatsApp and
+  Messenger keep end-to-end session state, and a copy that receives messages
+  can leave the real app missing them.
+- Hidden tabs throttle timers to near-zero; bring a tab to the front
+  (`showService`) before any test that awaits a `setTimeout`.
+- LinkedIn's feed scrolls inside `main#workspace`, not the window.
+- Do not leave the debug port on for a login: X refused the login as
+  automated (alongside a pinned old UA version). Restart without it.
+
+## Unread Badge Pitfalls
+
+- WhatsApp rewrites `document.title`, erasing the unread marker; the reporter
+  re-stamps whenever the marker is missing, not only when the count changes.
+- The "Archived" entry at the top of the WhatsApp chat list has its own unread
+  badge; it must not be counted.
+- The count must not depend on notification mode — notify mode only gates
+  popups. Gating it hid the badge for users with notifications off.
+
+
+- **A count shown in every mode needs its tab alive in every mode.** Making the
+  WhatsApp/Messenger count independent of the notify mode left Messenger (not
+  `keep_loaded`) eligible for the idle unload whenever notifications were off; a
+  blanked tab stops reporting, so the badge would freeze at a stale number.
+  Messaging tabs now always stay loaded unless the user switches the tab off
+  (which closes it). Caught in review, 2026-11-04.

@@ -32,18 +32,29 @@ Data is separated from the exe so installing, updating, or reinstalling never di
 
 ## Managed Services
 
-The workspace is intentionally fixed:
+The workspace is a fixed set of services:
 
 - WhatsApp
 - Messenger
 - LinkedIn
 - Bluesky
+- X (added 2026-11-04; starts switched off)
 - Google Calendar
+
+Signal is deliberately absent: it has no official web client, only Signal
+Desktop (Electron), so it cannot be hosted in a webview tab.
+
+The user can reorder the sidebar (drag, or right-click → Move up/down) and
+switch any tab off (right-click → Turn off). A switched-off tab's webview is
+destroyed (`unload_service`), so it costs no memory; one click on its dimmed
+icon recreates and opens it. Order and off-state live in the sidebar's
+localStorage; the sidebar asks Rust to warm WhatsApp/Messenger at startup via
+`preload_services` because only it knows which tabs are off.
 
 Default service temperature:
 
-- hot: WhatsApp, Google Calendar
-- cold after inactivity: Messenger, LinkedIn, Bluesky
+- hot: WhatsApp, Messenger (their unread counts must stay live in every notify mode), Google Calendar
+- cold after inactivity: LinkedIn, Bluesky, X
 
 Cold services are hidden normally during short switches. After the inactivity grace period, they are navigated to `about:blank` to release memory. When selected again, the controller navigates them back to their service URL automatically.
 
@@ -61,6 +72,41 @@ The WebView2 shell owns:
 - portable WebView2 storage location
 - single-instance behavior
 - window/tray behavior where supported by Tauri
+
+### Feed filters (LinkedIn, X, Bluesky)
+
+- `LINKEDIN_ADBLOCK_JS` hides promoted posts by their visible label. Labels
+  come in compound forms ("with 4 others • Promoted", "Promoted • Partnership
+  with X"), so the label is split on the bullet before matching.
+- `LINKEDIN_FEED_SORT_JS` drives LinkedIn's "Select feed view: Most recent
+  first / Most relevant first" menu (renamed from "Sort by" in 2026-11); the
+  feed type is also readable from item `componentkey` suffixes
+  (`MAIN_FEED_RECENT` / `MAIN_FEED_RELEVANCE`). At most 3 attempts a minute.
+- `X_CLEANUP_JS` (on page load, gated by the AdBlock toggle) hides promoted
+  posts (`placementTracking`, "Ad" label), timeline modules such as "Who to
+  follow", the right column except search, and Grok/Premium nav entries; it
+  opens the chronological "Following" tab once per load.
+- `FOREIGN_FILTER_JS` (document start; toggled from the URL bar's
+  "All languages / English only" button, no reload) hides non-English posts
+  using each site's own language signal: LinkedIn's translatable-commentary
+  wrapper (only present when LinkedIn offers "Show translation"), the `langs`
+  each Bluesky post record declares (read from feed API responses via a fetch
+  wrapper), and X's `lang` attribute on tweet text. No model is involved.
+
+### Tracking prevention and AI entry points
+
+- Tracking prevention is STRICT in normal use and drops to BALANCED while any
+  tab is on a login/verification URL (`is_login_url`). STRICT alone broke X's
+  login: it treats X's CDN (abs.twimg.com) as a tracker. The level belongs to
+  the shared profile, so it cannot differ per tab.
+- `AI_HIDE_CSS` hides AI entry points verified on the live sites (WhatsApp's
+  "Meta AI" button); X's Grok entries are in `X_CLEANUP_JS`.
+
+### User agent
+
+Service webviews send a Chrome-shaped UA carrying the real WebView2 major
+version (`chrome_ua()`). A pinned older version disagreed with the Sec-CH-UA
+client hints, and X refused the login as automated.
 
 ### Cookie / consent banners
 

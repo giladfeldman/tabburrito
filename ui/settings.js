@@ -11,6 +11,7 @@ const SERVICES = [
   { id: 'messenger', name: 'Messenger' },
   { id: 'linkedin', name: 'LinkedIn' },
   { id: 'bluesky', name: 'Bluesky' },
+  { id: 'x', name: 'X' },
   { id: 'calendar', name: 'Google Calendar' },
 ];
 

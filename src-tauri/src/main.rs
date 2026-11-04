@@ -32,7 +32,43 @@ fn agent_debug_log(_hypothesis_id: &str, _location: &str, _message: &str, _data:
 const SIDEBAR_W: f64 = 56.0;
 const URLBAR_H: f64 = 32.0;
 const DEFAULT_COLD_UNLOAD_SECS: u64 = 180;
-const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+/// Chrome-shaped user agent carrying the REAL engine major version.
+///
+/// It used to be pinned to Chrome/131 while the WebView2 engine (156 by
+/// 2026-11) reports its true version in the Sec-CH-UA client hints. That
+/// mismatch is a textbook automated-browser signal; X refused the login with
+/// "Sorry, you are not allowed to log in at this time" on 2026-11-04.
+/// The Chrome shape is kept because WhatsApp Web gates on a Chrome UA.
+fn chrome_ua() -> &'static str {
+    static UA: OnceLock<String> = OnceLock::new();
+    UA.get_or_init(|| {
+        let major = webview2_major_version().unwrap_or(131);
+        format!(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn webview2_major_version() -> Option<u32> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::GetAvailableCoreWebView2BrowserVersionString;
+    use windows::core::{PCWSTR, PWSTR};
+    let mut out = PWSTR::null();
+    unsafe {
+        GetAvailableCoreWebView2BrowserVersionString(PCWSTR::null(), &mut out).ok()?;
+        if out.is_null() {
+            return None;
+        }
+        // e.g. "156.0.4314.58" (a channel suffix may follow a space)
+        let v = out.to_string().ok()?;
+        v.split('.').next()?.trim().parse().ok()
+    }
+}
+
+#[cfg(not(windows))]
+fn webview2_major_version() -> Option<u32> {
+    None
+}
 
 fn exe_dir() -> std::path::PathBuf {
     std::env::current_exe()
@@ -268,6 +304,12 @@ const SERVICES: &[Service] = &[
         internal_hosts: &["bsky.app"],
     },
     Service {
+        id: "x",
+        url: "https://x.com/home",
+        keep_loaded: false,
+        internal_hosts: &["x.com", "twitter.com"],
+    },
+    Service {
         id: "calendar",
         url: "https://accounts.google.com/ServiceLogin?continue=https://calendar.google.com/calendar/u/0/r?hl%3Den&hl=en",
         keep_loaded: true,
@@ -371,10 +413,16 @@ const LINKEDIN_ADBLOCK_JS: &str = r#"
         hide(c);
     }
 
+    // Labels come as "Promoted", "Promoted by X", and (2026-11) compound
+    // forms such as "Promoted • Partnership with Zipify" or
+    // "with 2 others • Promoted". Split on the bullet and test each part.
     function isBlockedMarkerText(txt) {
-        return MARKER_TEXTS.has(txt) ||
-            txt.startsWith('promoted by') ||
-            txt.includes('sponsored content');
+        if (MARKER_TEXTS.has(txt) || txt.includes('sponsored content')) return true;
+        const parts = txt.split(/\s*[•·]\s*/);
+        for (const part of parts) {
+            if (part === 'promoted' || part.startsWith('promoted by')) return true;
+        }
+        return false;
     }
 
     function hide(el) {
@@ -1104,6 +1152,249 @@ const PASTE_HELPERS_JS: &str = r#"
 })();
 "#;
 
+// Non-English post hider — LinkedIn, Bluesky, X. Injected at document start
+// in the top frame; inert until the shell turns it on with
+// window.__tbSetHideForeign(true). Detection reuses each site's OWN language
+// signal, so it is free, instant and needs no model:
+//   LinkedIn: a post's text box sits inside a "translatable-commentary-…"
+//             wrapper only when LinkedIn offers "Show translation" (verified
+//             2026-11-04: 4/4 foreign posts flagged, 0/32 English posts).
+//   Bluesky:  every post record carries the author's declared `langs`; read
+//             from the feed API responses as they arrive (fetch wrapper).
+//             Posts with no declared language are left alone.
+//   X:        tweet text carries a `lang` attribute set by X itself.
+const FOREIGN_FILTER_JS: &str = r#"
+(function() {
+    'use strict';
+    if (window.top !== window || window.__tbForeignBoot) return;
+    window.__tbForeignBoot = true;
+    const host = location.hostname;
+    const ATTR = 'data-tb-lang-hidden';
+    let enabled = false;
+
+    // --- Bluesky: learn each post's declared languages from API traffic.
+    const bskyLangs = new Map(); // rkey -> [langs]
+    if (host.endsWith('bsky.app')) {
+        const orig = window.fetch;
+        window.fetch = async function(input) {
+            const res = await orig.apply(this, arguments);
+            try {
+                const u = String((input && (input.url || input.href)) || input || '');
+                if (u.indexOf('/xrpc/app.bsky.') !== -1) {
+                    res.clone().json().then((j) => {
+                        const walk = (o, depth) => {
+                            if (!o || typeof o !== 'object' || depth > 12) return;
+                            if (o.uri && o.record && o.record.$type === 'app.bsky.feed.post') {
+                                bskyLangs.set(String(o.uri).split('/').pop(), o.record.langs || []);
+                            }
+                            for (const k in o) walk(o[k], depth + 1);
+                        };
+                        walk(j, 0);
+                        if (enabled) schedule();
+                    }).catch(() => {});
+                }
+            } catch (_) {}
+            return res;
+        };
+    }
+
+    function isEnglishTag(tag) { return /^en(-|$)/i.test(tag || ''); }
+
+    // Returns [containerToHide, isForeign] pairs for the current page.
+    function candidates() {
+        const out = [];
+        if (host.endsWith('linkedin.com')) {
+            document.querySelectorAll('[role="listitem"][componentkey*="FeedType"]').forEach((post) => {
+                // Hidden only when EVERY text block is one LinkedIn offers to
+                // translate: a reshare with an English layer (either the
+                // resharer's note or the original) stays visible.
+                const boxes = post.querySelectorAll('[data-testid="expandable-text-box"]');
+                if (!boxes.length) return; // not rendered yet / no text: decide later
+                let foreign = true;
+                for (const b of boxes) {
+                    if (!b.closest('[id^="translatable-commentary-"]')) { foreign = false; break; }
+                }
+                out.push([post, foreign]);
+            });
+        } else if (host.endsWith('bsky.app')) {
+            document.querySelectorAll('[data-testid^="feedItem-by-"]').forEach((item) => {
+                const a = item.querySelector('a[href*="/post/"]');
+                if (!a) return;
+                const rkey = (a.getAttribute('href').split('/post/')[1] || '').split(/[/?#]/)[0];
+                const langs = bskyLangs.get(rkey);
+                if (!langs) return; // unknown yet
+                out.push([item, langs.length > 0 && !langs.some(isEnglishTag)]);
+            });
+        } else if (host === 'x.com' || host.endsWith('.x.com') || host.endsWith('twitter.com')) {
+            document.querySelectorAll('article[data-testid="tweet"]').forEach((art) => {
+                const t = art.querySelector('[data-testid="tweetText"][lang]');
+                if (!t) return;
+                const lang = (t.getAttribute('lang') || '').toLowerCase();
+                // und = undetermined, zxx = no text, q** = X's media/mention/hashtag-only codes
+                const foreign = /^[a-z]{2,3}(-|$)/.test(lang) && !isEnglishTag(lang) &&
+                    lang !== 'und' && lang !== 'zxx' && !/^q[a-z]{2}$/.test(lang);
+                out.push([art.closest('[data-testid="cellInnerDiv"]') || art, foreign]);
+            });
+        }
+        return out;
+    }
+
+    function scan() {
+        if (!enabled) return;
+        for (const [el, foreign] of candidates()) {
+            if (foreign) el.setAttribute(ATTR, '1');
+            else if (el.getAttribute(ATTR) === '1') el.removeAttribute(ATTR);
+        }
+    }
+    function showAll() {
+        document.querySelectorAll('[' + ATTR + '="1"]').forEach((el) => el.removeAttribute(ATTR));
+    }
+
+    let timer = null;
+    function schedule() {
+        if (timer) return;
+        timer = setTimeout(() => { timer = null; scan(); }, 250);
+    }
+
+    function injectCss() {
+        if (document.getElementById('tb-lang-css')) return;
+        const s = document.createElement('style');
+        s.id = 'tb-lang-css';
+        s.textContent = '[' + ATTR + '="1"]{display:none !important;}';
+        (document.head || document.documentElement).appendChild(s);
+    }
+
+    const obs = new MutationObserver(() => { if (enabled) schedule(); });
+    function start() {
+        if (!document.body) { setTimeout(start, 50); return; }
+        injectCss();
+        obs.observe(document.body, { childList: true, subtree: true });
+        scan();
+    }
+    start();
+
+    window.__tbSetHideForeign = function(on) {
+        enabled = !!on;
+        if (enabled) scan(); else showAll();
+    };
+})();
+"#;
+
+// X (Twitter) cleanup — the X equivalent of the LinkedIn blocker, approximating
+// what uBlock Origin's filter lists remove. Anchored only on X's semantic
+// data-testid / aria attributes and on the visible "Ad" label, never on its
+// generated class names. Blast radius is one timeline cell per match.
+const X_CLEANUP_JS: &str = r#"
+(function() {
+    'use strict';
+    if (window.top !== window || window.__tbXBoot) return;
+    window.__tbXBoot = true;
+
+    const CSS = `
+        [data-tb-x-hidden="1"] { display: none !important; }
+        /* Right column: trends, who-to-follow, Premium, live, news. Search stays. */
+        [data-testid="sidebarColumn"] section,
+        [data-testid="sidebarColumn"] aside,
+        [data-testid="sidebarColumn"] [aria-label="Footer"] { display: none !important; }
+        /* Left nav and post menus: Grok, Premium, Verified Orgs, Jobs, Business */
+        a[href="/i/grok"], a[href^="/i/grok?"], a[href="/i/premium_sign_up"],
+        a[href="/i/verified-orgs-signup"], a[href="/jobs"], a[href^="/i/jobs"],
+        a[href="/i/premium_business_sign_up"],
+        [data-testid="premium-signup-tab"], [data-testid="verified_orgs-signup-tab"],
+        [data-testid="GrokDrawer"], button[aria-label="Grok actions"] { display: none !important; }
+    `;
+    function injectCss() {
+        if (document.getElementById('tb-x-css')) return;
+        const s = document.createElement('style');
+        s.id = 'tb-x-css';
+        s.textContent = CSS;
+        (document.head || document.documentElement).appendChild(s);
+    }
+
+    const AD_LABELS = new Set(['ad', 'promoted']);
+    const MODULE_HEADINGS = /^(who to follow|you might like|relevant people|topics to follow|discover more|creators for you|subscribe to premium|trending now|today's news|what's happening|live on x)$/i;
+
+    function hideCell(el) {
+        const cell = el && el.closest && el.closest('[data-testid="cellInnerDiv"]');
+        if (cell) cell.setAttribute('data-tb-x-hidden', '1');
+    }
+
+    function scan() {
+        // 1. Promoted posts: the placementTracking wrapper, or an "Ad" label
+        //    as a short leaf span in the tweet (never body text: tweet text
+        //    lives inside [data-testid="tweetText"], which is skipped).
+        document.querySelectorAll('[data-testid="placementTracking"]').forEach(hideCell);
+        document.querySelectorAll('article[data-testid="tweet"]').forEach((art) => {
+            const spans = art.querySelectorAll('span');
+            for (const sp of spans) {
+                if (sp.children.length || sp.closest('[data-testid="tweetText"]')) continue;
+                const t = (sp.textContent || '').trim().toLowerCase();
+                if (AD_LABELS.has(t)) { hideCell(art); return; }
+            }
+        });
+        // 2. Timeline modules ("Who to follow" etc.): hide the heading cell
+        //    and the following non-tweet cells up to the next real post.
+        document.querySelectorAll('[data-testid="cellInnerDiv"] h2').forEach((h) => {
+            if (!MODULE_HEADINGS.test((h.textContent || '').trim())) return;
+            const cell = h.closest('[data-testid="cellInnerDiv"]');
+            if (!cell) return;
+            cell.setAttribute('data-tb-x-hidden', '1');
+            let next = cell.nextElementSibling;
+            for (let i = 0; next && i < 12; i++, next = next.nextElementSibling) {
+                if (next.querySelector('article[data-testid="tweet"]')) break;
+                next.setAttribute('data-tb-x-hidden', '1');
+            }
+        });
+    }
+
+    // Home: open the chronological "Following" tab once per page load, so
+    // the algorithmic "For you" mix is not the default. A later manual click
+    // on "For you" is respected.
+    let followingDone = false;
+    function preferFollowing() {
+        if (followingDone || location.pathname !== '/home') return;
+        const tabs = [...document.querySelectorAll('[role="tablist"] [role="tab"]')];
+        const following = tabs.find((t) => (t.textContent || '').trim() === 'Following');
+        if (!following) return;
+        followingDone = true;
+        if (following.getAttribute('aria-selected') !== 'true') following.click();
+    }
+
+    let timer = null;
+    const obs = new MutationObserver(() => {
+        if (timer) return;
+        timer = setTimeout(() => { timer = null; scan(); preferFollowing(); }, 250);
+    });
+    function start() {
+        if (!document.body) { setTimeout(start, 50); return; }
+        injectCss();
+        obs.observe(document.body, { childList: true, subtree: true });
+        scan();
+        preferFollowing();
+    }
+    start();
+    console.log('[Tabburrito] X cleanup active');
+})();
+"#;
+
+// AI-feature hider — removes AI entry points from the main UI without
+// touching anything else. Only selectors verified on the live sites are
+// listed; an unverified guess would hide nothing at best and a real control
+// at worst. (2026-11-04: WhatsApp's left-rail "Meta AI" button. Messenger,
+// Calendar and the LinkedIn feed showed no AI entry point at that time; X's
+// Grok entries are handled in X_CLEANUP_JS.)
+const AI_HIDE_CSS: &[(&str, &str)] = &[(
+    "whatsapp",
+    r#"button[aria-label="Meta AI"]{display:none !important;}"#,
+)];
+
+fn ai_hide_js(service_id: &str) -> Option<String> {
+    let css = AI_HIDE_CSS.iter().find(|(id, _)| *id == service_id)?.1;
+    Some(format!(
+        r#"(function(){{if(window.top!==window)return;function go(){{if(!document.documentElement){{setTimeout(go,50);return;}}if(document.getElementById('tb-ai-css'))return;var s=document.createElement('style');s.id='tb-ai-css';s.textContent={css:?};(document.head||document.documentElement).appendChild(s);}}go();}})();"#
+    ))
+}
+
 // LinkedIn feed Top/Recent enforcer — semantic text only, no hashed classes.
 const LINKEDIN_FEED_SORT_JS: &str = r#"
 (function() {
@@ -1145,37 +1436,25 @@ const LINKEDIN_FEED_SORT_JS: &str = r#"
         }
     }
 
-    function currentSort() {
-        const nodes = document.querySelectorAll('button, [role="button"], [aria-haspopup="menu"]');
-        for (const el of nodes) {
-            if (!visible(el)) continue;
-            const t = lower(el.textContent || el.getAttribute('aria-label') || '');
-            if (!t) continue;
-            if (t.includes('sort by') && t.includes('recent')) return 'recent';
-            if (t.includes('sort by') && t.includes('top')) return 'top';
-            if (t === 'recent' || t === 'top') {
-                const parent = el.closest('[class], div, section') || el.parentElement;
-                const pt = lower(parent && parent.textContent);
-                if (pt && pt.includes('sort')) return t === 'recent' ? 'recent' : 'top';
-            }
-        }
-        const selected = document.querySelectorAll('[aria-checked="true"], [aria-selected="true"], [role="menuitemradio"][aria-checked="true"]');
-        for (const el of selected) {
-            const t = lower(el.textContent || '');
-            if (t === 'recent' || t.includes('most recent')) return 'recent';
-            if (t === 'top' || t.includes('top post') || t.includes('most relevant')) return 'top';
-        }
+    // 2026-11 layout: the control is a [role=button] reading
+    // "Select feed view: Most recent first" and opens [role=menuitem]s
+    // "Most recent first" / "Most relevant first". Older layouts used
+    // "Sort by: Top/Recent". Both are matched on visible text only.
+    function classify(t) {
+        if (!t) return null;
+        if (t.includes('most recent') || t === 'recent' || t.endsWith(': recent')) return 'recent';
+        if (t.includes('most relevant') || t === 'top' || t.endsWith(': top') || t.includes('top post')) return 'top';
         return null;
     }
 
     function findSortTrigger() {
-        const nodes = [...document.querySelectorAll('button, [role="button"], [aria-haspopup="menu"]')];
+        const nodes = document.querySelectorAll('button, [role="button"], [aria-haspopup="menu"]');
         let best = null;
         for (const el of nodes) {
             if (!visible(el)) continue;
             const t = lower(el.textContent || el.getAttribute('aria-label') || '');
-            if (!t) continue;
-            if (t.includes('sort by')) return el;
+            if (!t || t.length > 80) continue;
+            if (t.startsWith('select feed view') || t.includes('sort by')) return el;
             if (t === 'top' || t === 'recent') {
                 const nearby = lower((el.parentElement && el.parentElement.textContent) || '');
                 if (nearby.includes('sort')) best = best || el;
@@ -1184,42 +1463,67 @@ const LINKEDIN_FEED_SORT_JS: &str = r#"
         return best;
     }
 
+    function currentSort() {
+        const trigger = findSortTrigger();
+        if (trigger) {
+            const t = lower(trigger.textContent || trigger.getAttribute('aria-label') || '');
+            const c = classify(t.replace(/^.*?(select feed view|sort by)\s*:?\s*/, ''));
+            if (c) return c;
+        }
+        // Fallback: the feed items carry the feed type in their componentkey.
+        const item = document.querySelector('[role="listitem"][componentkey*="FeedType_MAIN_FEED_"]');
+        if (item) {
+            const k = item.getAttribute('componentkey') || '';
+            if (k.endsWith('MAIN_FEED_RECENT')) return 'recent';
+            if (k.endsWith('MAIN_FEED_RELEVANCE')) return 'top';
+        }
+        return null;
+    }
+
     function findMenuOption(target) {
-        const labels = target === 'recent'
-            ? ['recent', 'most recent', 'recent posts']
-            : ['top', 'top posts', 'most relevant', 'relevant'];
-        const nodes = document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"], button, [role="button"], div[role="listitem"]');
+        const nodes = document.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="option"]');
         for (const el of nodes) {
             if (!visible(el)) continue;
             const t = lower(el.textContent || el.getAttribute('aria-label') || '');
             if (!t || t.length > 40) continue;
-            for (const label of labels) {
-                if (t === label || t.startsWith(label + ' ') || t.includes(label)) {
-                    if (t === label || t.startsWith(label)) return el;
-                }
-            }
+            if (classify(t) === target) return el;
         }
         return null;
     }
 
     let applying = false;
+    // Never flap the menu: at most 3 attempts per minute, so a layout we
+    // cannot read leaves the page alone instead of opening the menu forever.
+    let attempts = [];
     function apply() {
         if (applying) return;
         if (!location.pathname.includes('/feed')) return;
         const target = want();
         const cur = currentSort();
         if (cur === target) return;
+        const now = Date.now();
+        attempts = attempts.filter(t => now - t < 60000);
+        if (attempts.length >= 3) return;
+        const trigger = findSortTrigger();
+        if (!trigger) return;
+        attempts.push(now);
         applying = true;
         try {
-            const trigger = findSortTrigger();
-            if (!trigger) { applying = false; return; }
-            const alreadyOpen = !!findMenuOption(target);
-            if (!alreadyOpen) clickEl(trigger);
-            setTimeout(() => {
+            if (!findMenuOption(target)) clickEl(trigger);
+            let waited = 0;
+            const poll = () => {
                 const opt = findMenuOption(target);
-                if (opt) clickEl(opt);
-                applying = false;
-            }, 250);
+                if (opt) { clickEl(opt); applying = false; return; }
+                waited += 150;
+                if (waited >= 2000) {
+                    // Option never appeared: close the menu we opened.
+                    if (trigger.getAttribute('aria-expanded') === 'true') clickEl(trigger);
+                    applying = false;
+                    return;
+                }
+                setTimeout(poll, 150);
+            };
+            setTimeout(poll, 150);
         } catch (_) {
             applying = false;
         }
@@ -1227,6 +1531,7 @@ const LINKEDIN_FEED_SORT_JS: &str = r#"
 
     window.__tbApplyLinkedInSort = function(sort) {
         window.__tbLinkedInSort = (sort === 'top') ? 'top' : 'recent';
+        attempts = [];
         apply();
     };
 
@@ -1264,7 +1569,11 @@ const UNREAD_BOOTSTRAP_JS: &str = r#"
 
     function report(n) {
         n = Math.max(0, Math.floor(Number(n) || 0));
-        if (window.__tbLastUnread === n) return;
+        // WhatsApp rewrites document.title on its own (e.g. back to plain
+        // "WhatsApp"), which erases the marker. Re-stamp whenever it is
+        // missing, not only when the count changes.
+        const stamped = String(document.title || '').indexOf(MARK + 'TB' + n + MARK) !== -1;
+        if (window.__tbLastUnread === n && stamped) return;
         window.__tbLastUnread = n;
         try {
             const cleaned = String(document.title || '').replace(new RegExp(MARK + 'TB\\d+' + MARK, 'g'), '');
@@ -1294,6 +1603,12 @@ const UNREAD_BOOTSTRAP_JS: &str = r#"
         return false;
     }
 
+    function inArchivedEntry(el) {
+        if (el.closest('[data-testid="chatlist-panel-archived-button"]')) return true;
+        const row = el.closest('[data-testid="cell-frame-container"]');
+        return !!(row && row.querySelector('[data-icon="ic-archive"], [data-icon="archived"]'));
+    }
+
     function countWhatsApp() {
         let total = 0;
         const badges = document.querySelectorAll(
@@ -1301,6 +1616,10 @@ const UNREAD_BOOTSTRAP_JS: &str = r#"
         );
         const seen = new Set();
         badges.forEach((badge) => {
+            // The "Archived" entry at the top of the chat list carries its own
+            // unread badge for archived chats; counting it showed "3" while
+            // WhatsApp's Unread filter was empty (2026-11-04).
+            if (inArchivedEntry(badge)) return;
             const row = badge.closest('[data-testid="cell-frame-container"]')
                 || badge.closest('[role="listitem"]')
                 || badge.closest('div[tabindex="-1"]')
@@ -1317,6 +1636,7 @@ const UNREAD_BOOTSTRAP_JS: &str = r#"
             document.querySelectorAll('#pane-side span').forEach((span) => {
                 const t = (span.textContent || '').trim();
                 if (!/^\d{1,3}$/.test(t)) return;
+                if (inArchivedEntry(span)) return;
                 const row = span.closest('[data-testid="cell-frame-container"]')
                     || span.closest('[role="listitem"]')
                     || span.closest('div[tabindex="-1"]');
@@ -1534,6 +1854,7 @@ impl AdblockState {
     fn new() -> Self {
         let mut map = HashMap::new();
         map.insert("linkedin".to_string(), true);
+        map.insert("x".to_string(), true);
         Self {
             enabled: Mutex::new(map),
         }
@@ -1555,6 +1876,180 @@ impl AdblockState {
             .insert(service_id.to_string(), enabled);
     }
 }
+
+/// Services whose feeds can hide non-English posts.
+const LANG_FILTER_SERVICES: &[&str] = &["linkedin", "bluesky", "x"];
+
+/// "Hide non-English posts" per service. Off by default; the URL bar owns the
+/// persisted value and pushes it here at startup and on every toggle.
+struct LangFilterState {
+    enabled: Mutex<HashMap<String, bool>>,
+}
+
+impl LangFilterState {
+    fn new() -> Self {
+        Self {
+            enabled: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_enabled(&self, service_id: &str) -> bool {
+        self.enabled
+            .lock()
+            .unwrap()
+            .get(service_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn set_enabled(&self, service_id: &str, enabled: bool) {
+        self.enabled
+            .lock()
+            .unwrap()
+            .insert(service_id.to_string(), enabled);
+    }
+}
+
+/// Tracking prevention: STRICT in normal use, BALANCED while any tab is on a
+/// sign-in / verification page.
+///
+/// STRICT (Edge's strictest built-in tracker blocking) runs every service
+/// fine once logged in, but it broke X's login on 2026-11-04: it classes X's
+/// own CDN (abs.twimg.com) as a cross-site tracker and blocks a script chunk
+/// the login flow needs ("Continue" does nothing). The level belongs to the
+/// shared profile, so it cannot differ per tab; instead it is relaxed for as
+/// long as some tab sits on a login URL and restored when none does.
+struct TrackingState {
+    login_tabs: Mutex<std::collections::HashSet<String>>,
+    applied_relaxed: Mutex<Option<bool>>,
+}
+
+impl TrackingState {
+    fn new() -> Self {
+        Self {
+            login_tabs: Mutex::new(std::collections::HashSet::new()),
+            applied_relaxed: Mutex::new(None),
+        }
+    }
+
+    fn wants_relaxed(&self) -> bool {
+        !self.login_tabs.lock().unwrap().is_empty()
+    }
+}
+
+/// Sign-in, verification and account-recovery pages of the services we host.
+fn is_login_url(url: &url::Url) -> bool {
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    let path = url.path().to_ascii_lowercase();
+    let on = |h: &str| host == h || host.ends_with(&format!(".{h}"));
+    if on("accounts.google.com") || on("appleid.apple.com") {
+        return true;
+    }
+    if on("x.com") || on("twitter.com") {
+        return path.starts_with("/i/flow/")
+            || path.starts_with("/i/jf/onboarding")
+            || path.starts_with("/login")
+            || path.starts_with("/account/access")
+            || path.starts_with("/i/verify");
+    }
+    if on("linkedin.com") {
+        return path.starts_with("/login")
+            || path.starts_with("/checkpoint")
+            || path.starts_with("/uas/")
+            || path.starts_with("/authwall");
+    }
+    if on("facebook.com") || on("messenger.com") {
+        return path.starts_with("/login")
+            || path.starts_with("/checkpoint")
+            || path.starts_with("/two_step_verification")
+            || path.starts_with("/recover");
+    }
+    if on("bsky.app") {
+        return path.starts_with("/signin") || path.starts_with("/login");
+    }
+    false
+}
+
+fn set_tracking_level(webview: &tauri::Webview, relaxed: bool) {
+    let _ = webview.with_webview(move |platform| {
+        #[cfg(windows)]
+        unsafe {
+            use webview2_com::Microsoft::Web::WebView2::Win32::{
+                ICoreWebView2Profile3, ICoreWebView2_13,
+                COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_BALANCED,
+                COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_STRICT,
+            };
+            use windows::core::Interface;
+            let level = if relaxed {
+                COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_BALANCED
+            } else {
+                COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_STRICT
+            };
+            if let Ok(core) = platform.controller().CoreWebView2() {
+                if let Ok(core13) = core.cast::<ICoreWebView2_13>() {
+                    if let Ok(profile) = core13.Profile() {
+                        if let Ok(p3) = profile.cast::<ICoreWebView2Profile3>() {
+                            let _ = p3.SetPreferredTrackingPreventionLevel(level);
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (platform, relaxed);
+        }
+    });
+}
+
+/// Applies the wanted level through whichever service webview exists (the
+/// profile is shared, so one is enough). `force` re-applies even if unchanged,
+/// used for a freshly created webview.
+fn sync_tracking_level(app: &tauri::AppHandle, via: Option<&tauri::Webview>, force: bool) {
+    let state = app.state::<TrackingState>();
+    let relaxed = state.wants_relaxed();
+    {
+        let mut applied = state.applied_relaxed.lock().unwrap();
+        if !force && *applied == Some(relaxed) {
+            return;
+        }
+        *applied = Some(relaxed);
+    }
+    if let Some(wv) = via {
+        set_tracking_level(wv, relaxed);
+        return;
+    }
+    for svc in SERVICES {
+        if let Some(wv) = app.get_webview(svc.id) {
+            set_tracking_level(&wv, relaxed);
+            return;
+        }
+    }
+}
+
+/// Called for every top-level navigation a tab starts.
+fn note_tab_url_for_tracking(app: &tauri::AppHandle, service_id: &str, url: &url::Url) {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return;
+    }
+    {
+        let state = app.state::<TrackingState>();
+        let mut tabs = state.login_tabs.lock().unwrap();
+        if is_login_url(url) {
+            tabs.insert(service_id.to_string());
+        } else {
+            tabs.remove(service_id);
+        }
+    }
+    sync_tracking_level(app, None, false);
+}
+
+fn lang_filter_eval_js(hide: bool) -> String {
+    format!(
+        "if (typeof window.__tbSetHideForeign === 'function') window.__tbSetHideForeign({hide});"
+    )
+}
+
 
 /// Mute state: one global master switch plus per-service overrides.
 ///
@@ -1650,15 +2145,6 @@ impl NotifyState {
             tracked: Mutex::new(tracked),
             counts: Mutex::new(HashMap::new()),
         }
-    }
-
-    fn is_tracked(&self, service_id: &str) -> bool {
-        self.tracked
-            .lock()
-            .unwrap()
-            .get(service_id)
-            .copied()
-            .unwrap_or(false)
     }
 
     fn set_tracked(&self, service_id: &str, enabled: bool) {
@@ -1815,17 +2301,19 @@ fn apply_mute_to_all_services(app: &tauri::AppHandle) {
     }
 }
 
-fn service_should_keep_loaded(app: &tauri::AppHandle, svc: &Service) -> bool {
+fn service_should_keep_loaded(_app: &tauri::AppHandle, svc: &Service) -> bool {
+    tab_stays_loaded(svc)
+}
+
+fn tab_stays_loaded(svc: &Service) -> bool {
     if svc.keep_loaded {
         return true;
     }
-    // Keep notify-tracked messaging tabs hot so unread polling stays alive.
-    if (svc.id == "whatsapp" || svc.id == "messenger")
-        && app.state::<NotifyState>().is_tracked(svc.id)
-    {
-        return true;
-    }
-    false
+    // Messaging tabs stay hot whatever their notify mode: the sidebar shows
+    // their unread count in every mode, and a cold (about:blank) tab would
+    // freeze that count at a stale number. A tab the user switched off is
+    // closed outright by unload_service, so this costs nothing for it.
+    svc.id == "whatsapp" || svc.id == "messenger"
 }
 
 fn emit_unread(app: &tauri::AppHandle, service_id: &str, count: u32) {
@@ -1893,10 +2381,11 @@ fn set_service_url_override(app: &tauri::AppHandle, service_id: &str, url: &str)
 }
 
 fn handle_service_title_changed(app: &tauri::AppHandle, service_id: &str, title: String) {
+    // The unread COUNT is always reported for the messaging tabs; whether a
+    // popup notification follows is the sidebar's notify-mode decision.
+    // (Gating the count on notify mode hid the WhatsApp badge whenever
+    // notifications were off — 2026-11-04.)
     let notify = app.state::<NotifyState>();
-    if !notify.is_tracked(service_id) {
-        return;
-    }
     let Some(count) = parse_tb_unread_marker(&title) else {
         return;
     };
@@ -2239,6 +2728,16 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
         init_scripts.push('\n');
         init_scripts.push_str(UNREAD_BOOTSTRAP_JS);
     }
+    // Non-English filter: document start, because on Bluesky it must wrap
+    // fetch before the app's first feed request. Inert until switched on.
+    if LANG_FILTER_SERVICES.contains(&service.id) {
+        init_scripts.push('\n');
+        init_scripts.push_str(FOREIGN_FILTER_JS);
+    }
+    if let Some(ai_js) = ai_hide_js(service.id) {
+        init_scripts.push('\n');
+        init_scripts.push_str(&ai_js);
+    }
     // Paste helpers: image paste where the site lacks it, and Ctrl+Shift+V
     // plain-text paste everywhere it makes sense.
     //
@@ -2256,7 +2755,7 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
         init_scripts.push_str(PASTE_HELPERS_JS);
     }
     let mut builder = WebviewBuilder::new(service.id, WebviewUrl::External(url))
-        .user_agent(CHROME_UA)
+        .user_agent(chrome_ua())
         .data_directory(webview_data_dir())
         .auto_resize()
         .zoom_hotkeys_enabled(true)
@@ -2363,6 +2862,9 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
             }
             // #endregion
             let allowed = handle_navigation(navigation_service_nav, &url);
+            if allowed {
+                note_tab_url_for_tracking(&app_handle_for_nav, navigation_service_nav.id, &url);
+            }
             // Remember where the user actually is, so a tab that gets
             // unloaded for memory comes back to the same place instead of
             // resetting to the service root. Only ordinary http(s) page
@@ -2402,19 +2904,29 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
         });
     }
 
-    if service.id == "linkedin" {
-        let adblock_script = LINKEDIN_ADBLOCK_JS.to_string();
+    if service.id == "linkedin" || service.id == "x" || service.id == "bluesky" {
         let app_handle_for_page = app.clone();
         let svc_id = service.id.to_string();
         builder = builder.on_page_load(move |webview, payload| {
-            if payload.event() == PageLoadEvent::Finished {
-                let adblock = app_handle_for_page.state::<AdblockState>();
-                if adblock.is_enabled(&svc_id) {
-                    let _ = webview.eval(&adblock_script);
+            if payload.event() != PageLoadEvent::Finished {
+                return;
+            }
+            let adblock_on = app_handle_for_page
+                .state::<AdblockState>()
+                .is_enabled(&svc_id);
+            if svc_id == "linkedin" {
+                if adblock_on {
+                    let _ = webview.eval(LINKEDIN_ADBLOCK_JS);
                 }
                 let sort = app_handle_for_page.state::<LinkedInSortState>().get();
                 let _ = webview.eval(linkedin_feed_sort_eval_js(&sort));
+            } else if svc_id == "x" && adblock_on {
+                let _ = webview.eval(X_CLEANUP_JS);
             }
+            let hide = app_handle_for_page
+                .state::<LangFilterState>()
+                .is_enabled(&svc_id);
+            let _ = webview.eval(lang_filter_eval_js(hide));
         });
     }
 
@@ -2422,6 +2934,7 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
         .add_child(builder, position, size)
         .map_err(|e| e.to_string())?;
     wv.hide().map_err(|e| e.to_string())?;
+    sync_tracking_level(app, Some(&wv), true);
     app.state::<WebviewState>().set_loaded(service.id, true);
     app.state::<WebviewState>().mark_hidden(service.id);
     apply_mute_to_webview(&wv, app.state::<MuteState>().is_service_muted(service.id));
@@ -2579,6 +3092,69 @@ async fn set_linkedin_feed_sort(app: tauri::AppHandle, sort: String) -> Result<(
     app.state::<LinkedInSortState>().set(&sort);
     apply_linkedin_sort_to_webview(&app);
     Ok(())
+}
+
+#[tauri::command]
+async fn set_lang_filter(
+    app: tauri::AppHandle,
+    service_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    if !LANG_FILTER_SERVICES.contains(&service_id.as_str()) {
+        return Err("service has no language filter".to_string());
+    }
+    app.state::<LangFilterState>().set_enabled(&service_id, enabled);
+    if let Some(wv) = app.get_webview(&service_id) {
+        let _ = wv.eval(lang_filter_eval_js(enabled));
+    }
+    Ok(())
+}
+
+/// Turns a tab fully off: the webview is destroyed, so it holds no memory,
+/// runs no scripts and reports nothing until it is shown again (show_service
+/// recreates it on demand).
+#[tauri::command]
+async fn unload_service(app: tauri::AppHandle, service_id: String) -> Result<(), String> {
+    if service_by_id(&service_id).is_none() {
+        return Err("unknown service id".to_string());
+    }
+    if let Some(wv) = app.get_webview(&service_id) {
+        wv.close().map_err(|e| e.to_string())?;
+    }
+    let state = app.state::<WebviewState>();
+    state.set_loaded(&service_id, false);
+    state.mark_hidden(&service_id);
+    app.state::<TrackingState>().login_tabs.lock().unwrap().remove(&service_id);
+    sync_tracking_level(&app, None, false);
+    if app.state::<NotifyState>().set_count(&service_id, 0) {
+        emit_unread(&app, &service_id, 0);
+        update_tray_unread_tooltip(&app);
+    }
+    Ok(())
+}
+
+/// Creates (hidden) the webviews the sidebar wants warm at startup. The
+/// sidebar decides, because it owns which tabs are switched off.
+#[tauri::command]
+async fn preload_services(app: tauri::AppHandle, service_ids: Vec<String>) -> Result<(), String> {
+    // One failure must not stop the rest: show_service may be creating the
+    // same webview concurrently at startup, and losing that race returns a
+    // duplicate-label error for a tab that does exist.
+    let mut errors = Vec::new();
+    for id in service_ids {
+        if let Some(svc) = service_by_id(&id) {
+            if let Err(e) = create_service_webview(&app, svc) {
+                if app.get_webview(svc.id).is_none() {
+                    errors.push(format!("{id}: {e}"));
+                }
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 #[tauri::command]
@@ -3108,6 +3684,8 @@ fn main() {
         .manage(NotifyState::new())
         .manage(AppPrefsState::new())
         .manage(ServiceUrlState::new())
+        .manage(LangFilterState::new())
+        .manage(TrackingState::new())
         .invoke_handler(tauri::generate_handler![
             show_service,
             refresh_service,
@@ -3130,6 +3708,9 @@ fn main() {
             toggle_settings,
             set_service_muted,
             get_service_mutes,
+            set_lang_filter,
+            unload_service,
+            preload_services,
         ])
         .setup(|app| {
             // Must run before any webview opens the data folder.
@@ -3178,12 +3759,9 @@ fn main() {
                 LogicalSize::new(SIDEBAR_W, h),
             )?;
 
-            // Service webviews — offset by URL bar height
-            // Preload WhatsApp + Messenger (notify-tracked by default) so DM badges work.
-            create_service_webview(&app.handle().clone(), &SERVICES[0])
-                .map_err(tauri::Error::AssetNotFound)?;
-            create_service_webview(&app.handle().clone(), &SERVICES[1])
-                .map_err(tauri::Error::AssetNotFound)?;
+            // Service webviews are no longer preloaded here: the sidebar asks
+            // for WhatsApp + Messenger via preload_services once it knows
+            // which tabs the user has switched off.
 
             // URL bar webview (between sidebar and content)
             window.add_child(
@@ -3243,3 +3821,6 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running Tabburrito");
 }
+
+#[cfg(test)]
+mod tests;

@@ -5,6 +5,7 @@ const SERVICES = [
   { id: 'messenger', name: 'Messenger', url: 'https://www.messenger.com' },
   { id: 'linkedin', name: 'LinkedIn', url: 'https://www.linkedin.com/feed/' },
   { id: 'bluesky', name: 'Bluesky', url: 'https://bsky.app' },
+  { id: 'x', name: 'X', url: 'https://x.com/home' },
   { id: 'calendar', name: 'Calendar', url: 'https://accounts.google.com/ServiceLogin?continue=https://calendar.google.com/calendar/u/0/r?hl%3Den&hl=en' },
 ];
 const DEFAULT_SERVICE_URLS = Object.fromEntries(SERVICES.map(s => [s.id, s.url]));
@@ -15,6 +16,8 @@ let adblockByService = {}; // { serviceId: bool }
 let closedServices = {}; // { serviceId: bool }
 let linkedinFeedSort = 'recent'; // 'recent' | 'top'
 let lastGoodUrls = {}; // { serviceId: url }
+let hideForeign = {}; // { serviceId: bool } — hide non-English posts
+const LANG_FILTER_SERVICES = ['linkedin', 'bluesky', 'x'];
 
 function loadState() {
   try {
@@ -23,6 +26,7 @@ function loadState() {
     adblockByService = s.adblock || {};
     closedServices = s.closed || {};
     lastGoodUrls = s.lastGoodUrls || {};
+    hideForeign = s.hideForeign || {};
     linkedinFeedSort = s.linkedinFeedSort === 'top' ? 'top' : 'recent';
     // Load custom URLs
     if (s.urls) {
@@ -43,11 +47,12 @@ function saveState() {
     urls: urls,
     linkedinFeedSort: linkedinFeedSort,
     lastGoodUrls: lastGoodUrls,
+    hideForeign: hideForeign,
   }));
 }
 
 function getAdblock(id) {
-  if (adblockByService[id] === undefined) return id === 'linkedin';
+  if (adblockByService[id] === undefined) return id === 'linkedin' || id === 'x';
   return adblockByService[id];
 }
 
@@ -103,6 +108,30 @@ function toggleLinkedInFeedSort() {
   syncLinkedInFeedSort();
 }
 
+// Non-English filter: takes effect immediately, no reload (the page-side
+// script is already present and only switches on/off).
+function updateLangToggle() {
+  const el = document.getElementById('lang-toggle');
+  if (!el) return;
+  const supported = LANG_FILTER_SERVICES.includes(currentService);
+  el.classList.toggle('visible', supported);
+  if (!supported) return;
+  const on = !!hideForeign[currentService];
+  el.classList.toggle('on', on);
+  el.textContent = on ? '\u{1F310} English only' : '\u{1F310} All languages';
+  el.title = on
+    ? 'Non-English posts are hidden. Click to show all languages.'
+    : 'Click to hide posts that are not in English.';
+}
+
+function syncLangFilter(id) {
+  if (!window.__TAURI__) return;
+  window.__TAURI__.core.invoke('set_lang_filter', {
+    serviceId: id,
+    enabled: !!hideForeign[id],
+  }).catch(() => {});
+}
+
 // Reflects the current service's adblock state in the indicator. Shared by
 // updateForService, the indicator's own click handler, and the settings panel.
 function updateAdblockButton() {
@@ -125,6 +154,7 @@ function updateForService(id) {
 
   updateAdblockButton();
   updateFeedSortToggle();
+  updateLangToggle();
 
   // Apply saved zoom
   const zoom = getZoom(id);
@@ -205,6 +235,14 @@ document.getElementById('adblock-indicator').addEventListener('click', () => {
   if (window.__TAURI__) {
     window.__TAURI__.core.invoke('reload_service', { label: currentService }).catch(() => {});
   }
+});
+
+document.getElementById('lang-toggle').addEventListener('click', () => {
+  if (!LANG_FILTER_SERVICES.includes(currentService)) return;
+  hideForeign[currentService] = !hideForeign[currentService];
+  saveState();
+  updateLangToggle();
+  syncLangFilter(currentService);
 });
 
 document.getElementById('feed-sort-toggle').addEventListener('click', () => {
@@ -298,6 +336,7 @@ if (window.__TAURI__) {
     }).catch(() => {});
   });
   syncLinkedInFeedSort();
+  LANG_FILTER_SERVICES.forEach(syncLangFilter);
   SERVICES.forEach(svc => {
     pushServiceUrlToRust(svc.id, svc.url);
   });

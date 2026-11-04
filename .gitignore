@@ -90,3 +90,11 @@ TabburritoSessions_*.zip
 # Python cache
 __pycache__/
 *.pyc
+
+communications/
+
+# Scratch files
+tmp/
+
+# Local-only Claude Code skills
+.claude/

@@ -5,6 +5,7 @@ const SERVICES = [
   { id: 'messenger', name: 'Messenger', icon: 'MS' },
   { id: 'linkedin', name: 'LinkedIn', icon: 'IN' },
   { id: 'bluesky', name: 'Bluesky', icon: 'BS' },
+  { id: 'x', name: 'X', icon: 'X' },
   { id: 'calendar', name: 'Google Calendar', icon: 'GC' },
 ];
 
@@ -20,6 +21,12 @@ let unloadSeconds = 180;
 let dndUntil = 0;
 let resourceMode = 'balanced'; // lean|balanced|instant
 let profiles = {}; // {name: { sidebarState, portablePayload }}
+let serviceOrder = []; // sidebar order (ids); empty = default order
+let disabledServices = []; // ids of tabs switched off
+// Only these report unread counts (see UNREAD_BOOTSTRAP_JS in main.rs).
+const UNREAD_CAPABLE = ['whatsapp', 'messenger'];
+// Warm at startup (unless switched off) so their unread counts are live.
+const PRELOAD = ['whatsapp', 'messenger'];
 
 function loadState() {
   try {
@@ -33,6 +40,9 @@ function loadState() {
     dndUntil = Number(s.dndUntil) || 0;
     resourceMode = s.resourceMode || resourceMode;
     profiles = s.profiles || {};
+    serviceOrder = Array.isArray(s.serviceOrder) ? s.serviceOrder : [];
+    // X is new: start it switched off so it costs nothing until first used.
+    disabledServices = Array.isArray(s.disabledServices) ? s.disabledServices : ['x'];
   } catch {}
 }
 
@@ -47,6 +57,8 @@ function saveState() {
     dndUntil,
     resourceMode,
     profiles,
+    serviceOrder,
+    disabledServices,
   }));
 }
 
@@ -60,22 +72,142 @@ function formatBadgeCount(n) {
   return String(n);
 }
 
+// Services in the user's sidebar order. Unknown ids in a saved order are
+// dropped; services added in a later version are appended at the end.
+function orderedServices() {
+  const byId = Object.fromEntries(SERVICES.map(s => [s.id, s]));
+  const out = [];
+  serviceOrder.forEach(id => { if (byId[id] && !out.includes(byId[id])) out.push(byId[id]); });
+  SERVICES.forEach(s => { if (!out.includes(s)) out.push(s); });
+  return out;
+}
+
+function isDisabled(id) {
+  return disabledServices.includes(id);
+}
+
+// Switched-off tab: its webview is destroyed (no memory, no scripts). One
+// click on the dimmed icon turns it back on and opens it.
+async function setServiceEnabled(id, enabled) {
+  if (enabled) {
+    disabledServices = disabledServices.filter(s => s !== id);
+    saveState();
+    buildSidebar();
+    await showService(id);
+    return;
+  }
+  if (!disabledServices.includes(id)) disabledServices.push(id);
+  unreadCounts[id] = 0;
+  saveState();
+  if (activeService === id) {
+    const next = orderedServices().find(s => !isDisabled(s.id));
+    if (next) await showService(next.id);
+  }
+  buildSidebar();
+  if (window.__TAURI__) {
+    await window.__TAURI__.core.invoke('unload_service', { serviceId: id }).catch(() => {});
+  }
+}
+
+function moveService(id, delta) {
+  const ids = orderedServices().map(s => s.id);
+  const i = ids.indexOf(id);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= ids.length) return;
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  serviceOrder = ids;
+  saveState();
+  buildSidebar();
+}
+
+const NOTIFY_LABELS = { off: 'Off', badge: 'Count only', full: 'Count + popup' };
+
+async function openServiceMenu(svc) {
+  const menuApi = window.__TAURI__?.menu;
+  if (!menuApi) return;
+  const disabled = isDisabled(svc.id);
+  const ids = orderedServices().map(s => s.id);
+  const idx = ids.indexOf(svc.id);
+  const items = [
+    await menuApi.MenuItem.new({
+      text: disabled ? `Turn on ${svc.name}` : `Turn off ${svc.name}`,
+      action: () => setServiceEnabled(svc.id, disabled),
+    }),
+    await menuApi.PredefinedMenuItem.new({ item: 'Separator' }),
+    await menuApi.MenuItem.new({ text: 'Move up', enabled: idx > 0, action: () => moveService(svc.id, -1) }),
+    await menuApi.MenuItem.new({ text: 'Move down', enabled: idx < ids.length - 1, action: () => moveService(svc.id, 1) }),
+  ];
+  if (UNREAD_CAPABLE.includes(svc.id)) {
+    const mode = notifyModes[svc.id] || 'off';
+    items.push(await menuApi.PredefinedMenuItem.new({ item: 'Separator' }));
+    for (const m of ['off', 'badge', 'full']) {
+      items.push(await menuApi.CheckMenuItem.new({
+        text: `Notifications: ${NOTIFY_LABELS[m]}`,
+        checked: mode === m,
+        action: () => setNotifyMode(svc.id, m),
+      }));
+    }
+  }
+  const menu = await menuApi.Menu.new({ items });
+  await menu.popup();
+}
+
+let dragId = null;
+
 function buildSidebar() {
   const c = document.getElementById('service-icons');
-  SERVICES.forEach((svc) => {
+  c.innerHTML = '';
+  orderedServices().forEach((svc) => {
     const btn = document.createElement('button');
     btn.className = 'service-icon';
-    btn.title = svc.name;
     btn.dataset.id = svc.id;
+    btn.draggable = true;
     btn.innerHTML = `<span class="svc-emoji">${svc.icon}</span><span class="notif-dot"></span>`;
-    btn.addEventListener('click', () => showService(svc.id));
+    btn.classList.toggle('svc-disabled', isDisabled(svc.id));
+    btn.classList.toggle('active', svc.id === activeService && !isDisabled(svc.id));
+    btn.addEventListener('click', () => {
+      if (isDisabled(svc.id)) setServiceEnabled(svc.id, true);
+      else showService(svc.id);
+    });
     btn.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      if (e.shiftKey) cycleNotifyMode(svc.id);
-      else toggleNotifyService(svc.id);
+      openServiceMenu(svc);
+    });
+    // Drag to reorder.
+    btn.addEventListener('dragstart', (e) => {
+      dragId = svc.id;
+      btn.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', svc.id);
+    });
+    btn.addEventListener('dragend', () => {
+      dragId = null;
+      document.querySelectorAll('.service-icon').forEach(b => b.classList.remove('dragging', 'drop-before', 'drop-after'));
+    });
+    btn.addEventListener('dragover', (e) => {
+      if (!dragId || dragId === svc.id) return;
+      e.preventDefault();
+      const r = btn.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
+      btn.classList.toggle('drop-before', !after);
+      btn.classList.toggle('drop-after', after);
+    });
+    btn.addEventListener('dragleave', () => btn.classList.remove('drop-before', 'drop-after'));
+    btn.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (!dragId || dragId === svc.id) return;
+      const r = btn.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
+      const ids = orderedServices().map(s => s.id).filter(id => id !== dragId);
+      const at = ids.indexOf(svc.id) + (after ? 1 : 0);
+      ids.splice(at, 0, dragId);
+      serviceOrder = ids;
+      saveState();
+      buildSidebar();
     });
     c.appendChild(btn);
   });
+  updateNotifyIndicators();
 }
 
 function updateNotifyIndicators() {
@@ -83,19 +215,18 @@ function updateNotifyIndicators() {
     const btn = document.querySelector(`.service-icon[data-id="${svc.id}"]`);
     if (!btn) return;
     const dot = btn.querySelector('.notif-dot');
-    const tracked = notifyServices.includes(svc.id);
-    const mode = notifyModes[svc.id] || (tracked ? 'full' : 'off');
-    const count = unreadCounts[svc.id] || 0;
+    const mode = notifyModes[svc.id] || 'off';
+    const disabled = isDisabled(svc.id);
+    // The unread count always shows for the messaging tabs; the notify mode
+    // only decides whether a popup follows.
+    const count = disabled ? 0 : (unreadCounts[svc.id] || 0);
 
-    btn.classList.toggle('notify-tracked', tracked);
-    btn.classList.toggle('has-unread', tracked && count > 0);
-    btn.classList.toggle('mode-badge', mode === 'badge');
-    btn.classList.toggle('mode-off', mode === 'off');
-
-    if (!dot) return;
-    if (tracked && count > 0) dot.textContent = formatBadgeCount(count);
-    else dot.textContent = '';
-    btn.title = tracked ? `${svc.name} (${mode})` : `${svc.name} (off)`;
+    btn.classList.toggle('has-unread', count > 0);
+    if (dot) dot.textContent = count > 0 ? formatBadgeCount(count) : '';
+    const parts = [svc.name];
+    if (disabled) parts.push('off — click to turn on');
+    else if (count > 0) parts.push(`${count} unread`);
+    btn.title = parts.join(' · ') + '\nRight-click: turn off, move, notifications. Drag to reorder.';
   });
 }
 
@@ -109,31 +240,12 @@ function syncNotifyServicesToRust() {
   });
 }
 
-function toggleNotifyService(id) {
-  const idx = notifyServices.indexOf(id);
-  if (idx >= 0) {
-    notifyServices.splice(idx, 1);
-    unreadCounts[id] = 0;
-    notifyModes[id] = 'off';
-  } else {
-    notifyServices.push(id);
-    notifyModes[id] = notifyModes[id] === 'off' ? 'badge' : (notifyModes[id] || 'full');
-  }
-  saveState();
-  updateNotifyIndicators();
-  syncNotifyServicesToRust();
-}
-
-function cycleNotifyMode(id) {
-  const current = notifyModes[id] || 'off';
-  const next = current === 'off' ? 'badge' : current === 'badge' ? 'full' : 'off';
-  notifyModes[id] = next;
-  if (next === 'off') {
-    notifyServices = notifyServices.filter(s => s !== id);
-    unreadCounts[id] = 0;
-  } else if (!notifyServices.includes(id)) {
-    notifyServices.push(id);
-  }
+// Notify mode decides popups only (off | badge = count only | full = count +
+// popup). The unread count itself is always shown for the messaging tabs.
+function setNotifyMode(id, mode) {
+  notifyModes[id] = mode;
+  if (mode === 'off') notifyServices = notifyServices.filter(s => s !== id);
+  else if (!notifyServices.includes(id)) notifyServices.push(id);
   saveState();
   updateNotifyIndicators();
   syncNotifyServicesToRust();
@@ -291,6 +403,13 @@ async function restorePortableBackup() {
 }
 
 async function showService(id) {
+  if (isDisabled(id)) {
+    // Opening a switched-off tab (palette, shortcut, click) turns it on.
+    disabledServices = disabledServices.filter(s => s !== id);
+    activeService = id;
+    saveState();
+    buildSidebar();
+  }
   document.querySelectorAll('.service-icon').forEach(el => el.classList.remove('active'));
   document.querySelector(`.service-icon[data-id="${id}"]`)?.classList.add('active');
   activeService = id;
@@ -522,9 +641,9 @@ function closePalette() {
 }
 
 document.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.key >= '1' && e.key <= '5') {
-    e.preventDefault();
-    if (SERVICES[+e.key - 1]) showService(SERVICES[+e.key - 1].id);
+  if (e.ctrlKey && e.key >= '1' && e.key <= '9') {
+    const svc = orderedServices()[+e.key - 1];
+    if (svc) { e.preventDefault(); showService(svc.id); }
   }
   if (e.ctrlKey && e.key.toLowerCase() === 'm') { e.preventDefault(); toggleMute(); }
   if (e.ctrlKey && e.key.toLowerCase() === 'd') { e.preventDefault(); toggleDark(); }
@@ -566,7 +685,13 @@ function init() {
   }
   setInterval(updateDndButton, 30_000);
 
-  const target = activeService || SERVICES[0].id;
+  if (window.__TAURI__) {
+    window.__TAURI__.core.invoke('preload_services', {
+      serviceIds: PRELOAD.filter(id => !isDisabled(id)),
+    }).catch(() => {});
+  }
+  const firstOn = orderedServices().find(s => !isDisabled(s.id)) || SERVICES[0];
+  const target = (activeService && !isDisabled(activeService)) ? activeService : firstOn.id;
   setTimeout(() => showService(target), 500);
   setTimeout(() => showService(target), 1000);
   setTimeout(() => showService(target), 2000);

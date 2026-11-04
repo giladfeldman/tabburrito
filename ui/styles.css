@@ -162,13 +162,28 @@ body.light .sidebar-btn:hover {
   padding: 2px 5px;
 }
 
-.service-icon.mode-badge .svc-emoji {
-  border: 1px solid #64748b;
+/* Tab switched off: dimmed and dashed; one click turns it back on. */
+.service-icon.svc-disabled .svc-emoji {
+  opacity: 0.35;
+  filter: grayscale(1);
+  border: 1px dashed #64748b;
 }
 
-.service-icon.mode-off .svc-emoji {
-  opacity: 0.45;
-  filter: grayscale(1);
+.service-icon.svc-disabled:hover .svc-emoji {
+  opacity: 0.8;
+}
+
+/* Drag-to-reorder */
+.service-icon.dragging {
+  opacity: 0.4;
+}
+
+.service-icon.drop-before {
+  box-shadow: 0 -3px 0 0 var(--accent);
+}
+
+.service-icon.drop-after {
+  box-shadow: 0 3px 0 0 var(--accent);
 }
 
 .notif-dot {
@@ -187,13 +202,6 @@ body.light .sidebar-btn:hover {
   min-width: 8px;
   padding: 0;
   pointer-events: none;
-}
-
-.service-icon.notify-tracked .notif-dot {
-  display: block;
-  background: rgba(100, 100, 100, 0.35);
-  width: 6px;
-  height: 6px;
 }
 
 .service-icon.has-unread .notif-dot {

@@ -95,3 +95,11 @@ Session sync is the risky part and is deliberately NOT bundled with it.
   (`vssadmin list shadows`) needs elevation. Attempted 2026-08-04 for the lost sessions and
   blocked. With File History Stopped and no restore points it is very unlikely to hold
   anything, but it is the one stone left unturned from that incident.
+
+## Tabburrito
+
+- [ ] [MED · soon · val:med · S · sonnet-medium] Confirm WhatsApp sidebar count on a real unread 1:1 chat (archived-row fix only verified to read 0) (src: src-tauri/src/main.rs UNREAD_BOOTSTRAP_JS) ^d-dbf11b
+- [ ] [LOW · later · val:med · M · opus-medium] WhatsApp unread count only sees chat rows currently rendered (list is virtualized); consider WhatsApp's own unread total (src: src-tauri/src/main.rs countWhatsApp) ^d-4d060d
+- [ ] [LOW · later · val:low · S · sonnet-medium] X login via Google/Apple sign-in popups is untested (accounts.google.com is not an internal host of the X tab) (src: src-tauri/src/main.rs SERVICES x) ^d-fe0323
+- [ ] [MED · later · val:med · M · sonnet-medium] Add Rust unit tests for is_login_url, isBlockedMarkerText-style label parsing, and lang classification (src: tabburrito-qa: 0 #[test] in src-tauri/src) ^d-dec3ce
+- [ ] [LOW · later · val:low · M · opus-medium] Purge compiled Rust build artifacts (tabburrito-lite/src-tauri/target) from public git history (src: publication-text-scan --history: 65 rlib/rmeta suspects) ^d-c4d3f1
