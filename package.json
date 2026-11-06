@@ -1,5 +1,6 @@
 {
   "name": "tabburrito",
+  "license": "AGPL-3.0-only",
   "version": "0.1.0",
   "description": "Portable multi-service web app dock built with Tauri and WebView2",
   "private": true,
