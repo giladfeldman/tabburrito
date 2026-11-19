@@ -81,6 +81,16 @@ New-Item -ItemType Directory -Path $DataDir    -Force | Out-Null
 # half-written exe as the installed application.
 $staged = "$TargetExe.staged"
 Copy-Item -LiteralPath $SourceExe -Destination $staged -Force
+
+# Sign before the move so the exe is never briefly live in an unsigned state.
+# Signing is best-effort: with no certificate this reports UNSIGNED and returns
+# 0, and a working install still beats no install. A genuine signing FAILURE is
+# surfaced loudly rather than swallowed.
+& (Join-Path $PSScriptRoot 'Sign-Tabburrito.ps1') -Path $staged
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'WARNING: signing failed - installing an UNSIGNED binary.' -ForegroundColor Red
+}
+
 Move-Item -LiteralPath $staged -Destination $TargetExe -Force
 
 $version = (Get-Item -LiteralPath $TargetExe).VersionInfo.FileVersion
@@ -89,6 +99,12 @@ if (-not $version) { $version = '0.1.0' }
 # Record what is installed so the updater can compare against the remote build.
 # repoRoot lets the running app locate Update-Tabburrito.ps1 for the in-app
 # "Check for updates" button — the installed exe lives outside the repo.
+# sourceDirty records whether the working tree had uncommitted changes at build
+# time. cargo compiles the WORKING TREE, so without this the manifest would
+# claim a provenance the exe does not actually have. The updater still tracks
+# staleness by commit (a dirty tree must not force a rebuild on every run).
+$sourceDirty = [bool](& git -C $RepoRoot status --porcelain 2>$null)
+
 $manifest = [ordered]@{
     version     = $version
     installedAt = (Get-Date).ToString('o')
@@ -96,6 +112,7 @@ $manifest = [ordered]@{
     dataDir     = $DataDir
     repoRoot    = $RepoRoot
     sourceCommit = (& git -C $RepoRoot rev-parse HEAD 2>$null)
+    sourceDirty  = $sourceDirty
 }
 # Write WITHOUT a BOM. Windows PowerShell 5.1's `-Encoding utf8` emits a UTF-8
 # BOM, and serde_json (which the app uses to read this file) rejects a leading

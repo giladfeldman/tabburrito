@@ -36,7 +36,11 @@ $TaskName   = 'Tabburrito Auto-Update'
 $UpdateScript = Join-Path $PSScriptRoot 'Update-Tabburrito.ps1'
 
 if ($Remove) {
-    & schtasks /Delete /TN $TaskName /F 2>&1 | Out-Null
+    # 2>$null, not 2>&1: schtasks writes "cannot find the file specified" to
+    # stderr when the task is already absent, and in PS 5.1 the 2>&1 form turns
+    # that into a NativeCommandError which $ErrorActionPreference='Stop' makes
+    # terminating - i.e. an idempotent -Remove would crash.
+    & schtasks /Delete /TN $TaskName /F 2>$null | Out-Null
     Write-Host "Removed scheduled task '$TaskName'." -ForegroundColor Green
     return
 }
@@ -99,8 +103,18 @@ $xmlPath = Join-Path $env:TEMP 'TabburritoAutoUpdate.xml'
 [System.IO.File]::WriteAllText($xmlPath, $xml, [System.Text.Encoding]::Unicode)
 
 try {
-    $output = & schtasks /Create /TN $TaskName /XML $xmlPath /F 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    # Relax EAP across the native call only: with 'Stop', a single stderr line
+    # becomes a terminating NativeCommandError and the $LASTEXITCODE check
+    # below never runs, so the intended error message is unreachable.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & schtasks /Create /TN $TaskName /XML $xmlPath /F 2>&1
+        $schtasksExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($schtasksExit -ne 0) {
         Write-Error "schtasks failed: $output"
     }
 } finally {
