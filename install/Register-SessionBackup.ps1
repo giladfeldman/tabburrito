@@ -17,7 +17,7 @@
 
     Registered via schtasks + task XML rather than Register-ScheduledTask,
     which fails with "Access is denied" on this machine even for a per-user
-    task (same constraint as Register-AutoUpdate.ps1).
+    task.
 
 .PARAMETER Day
     Day of week to run. Default Sunday.

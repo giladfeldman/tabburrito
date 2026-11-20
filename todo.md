@@ -93,7 +93,7 @@ Session sync is the risky part and is deliberately NOT bundled with it.
 
 ## Install / robustness follow-ups (2026-08-04)
 
-- [ ] [HIGH · soon · val:high · S · sonnet-medium] INST-1 | chore | P2 | status:open | Verify the auto-update task end-to-end against a real ^d-2c6b26
+- [x] [HIGH · soon · val:high · S · sonnet-medium] INST-1 | chore | P2 | status:open | Verify the auto-update task end-to-end against a real ^d-2c6b26 (fixed 2026-11-20: 2026-11-20: source-rebuild updater removed; replaced by release-based Tauri updater. install/Tests/Test-UpdaterEndToEnd.ps1 ran 14/14 PASS locally (tampered + wrong-key installers refused with exe hash unchanged; genuine 0.2.0->0.2.1 update verified, installed, relaunched, session files unchanged).)
   remote commit. Detection, the dirty-tree guard, and build-failure safety were each tested
   2026-08-04, but a full fetch->rebuild->reinstall cycle has never run from an actually-newer
   origin/main. Do this once after the next push lands.
@@ -135,8 +135,13 @@ Session sync is the risky part and is deliberately NOT bundled with it.
   stores. STILL OPEN: a self-signed cert is local-only, is worse than useless on any other
   machine, and is NOT proven to stop the ML false positive. Closing this properly needs a real
   CA-issued certificate; the plumbing then takes it with no code change beyond -CertSubject.)*
+  *(2026-11-20: the signing scripts were removed with the source-rebuild updater. Releases are now
+  NSIS setup.exe files on GitHub, update-verified by a minisign key (tamper-proof), but still NOT
+  Authenticode-signed - so SmartScreen warns on first install and the Defender ML false positive can
+  still hit other users. A real CA or Azure Trusted Signing certificate remains the fix; it would be
+  applied in install/Publish-TabburritoRelease.ps1 before the .sig is made.)*
 
-- [ ] [LOW · later · val:low · L · sonnet-medium] INST-4 | chore | P4 | status:open | Consider a real MSI/NSIS bundle via `tauri build`. ^d-7d2168
+- [x] [LOW · later · val:low · L · sonnet-medium] INST-4 | chore | P4 | status:open | Consider a real MSI/NSIS bundle via `tauri build`. ^d-7d2168 (fixed 2026-11-20: 2026-11-20: releases are now per-user NSIS installers built by tauri build (src-tauri/tauri.conf.json bundle.targets nsis, patched template src-tauri/windows/installer.nsi).)
   `tauri.conf.json` already sets `bundle.targets: "all"`, but the current flow ships a bare exe
   plus PowerShell installer. Only worth doing if Tabburrito is distributed beyond this machine;
   any bundle MUST keep user data in %LOCALAPPDATA%\Tabburrito, never beside the exe.
@@ -190,7 +195,7 @@ Session sync is the risky part and is deliberately NOT bundled with it.
   shortcuts recreated, manifest back to HEAD, second run correctly silent (no rebuild loop).)*
 
 ## From cross-project review (2026-08-07)
-- [ ] [HIGH · soon · val:high · S · sonnet-medium] R-0138 | WindowsTuneUp | gap | P1 | status:open | phase:3 | first:2026-08-07 | INST-1: auto-update path has never run against a newer origin/main on a self-updating unsigned binary (see project-review R-0138) ^d-500308
+- [x] [HIGH · soon · val:high · S · sonnet-medium] R-0138 | WindowsTuneUp | gap | P1 | status:open | phase:3 | first:2026-08-07 | INST-1: auto-update path has never run against a newer origin/main on a self-updating unsigned binary (see project-review R-0138) ^d-500308 (fixed 2026-11-20: 2026-11-20: source-rebuild updater removed; replaced by release-based Tauri updater. install/Tests/Test-UpdaterEndToEnd.ps1 ran 14/14 PASS locally (tampered + wrong-key installers refused with exe hash unchanged; genuine 0.2.0->0.2.1 update verified, installed, relaunched, session files unchanged).)
 
 ## Tabburrito
 

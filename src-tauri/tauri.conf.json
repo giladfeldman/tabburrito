@@ -1,6 +1,6 @@
 {
   "productName": "Tabburrito",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.tabburrito.app",
   "build": {
     "frontendDist": "../ui",
@@ -16,7 +16,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "homepage": "https://github.com/giladfeldman/tabburrito",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "template": "windows/installer.nsi"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -24,5 +32,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBNTJFMEFFQTMxN0IxNkIKUldScnNSZWpydUJTK2krcmRvZFZSNHdWNlVObEpPZ2FyYXBNdHpCMXlDam9aVjUyQlhlMDhFREoK",
+      "endpoints": [
+        "https://github.com/giladfeldman/tabburrito/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

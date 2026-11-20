@@ -1,72 +1,152 @@
-# Tabburrito — Windows install
+# Tabburrito — Windows install and updates
 
-Installs Tabburrito as a real Windows application, with sessions stored where
-Windows expects user data and an updater that tracks GitHub.
+Tabburrito is installed from a release on GitHub and keeps itself up to date
+from later releases. No Rust, no source checkout and no build tools are needed
+on the machine that runs it.
 
-## Why this exists
+## Where things live
 
-Before this, the "release" exe lived at
-`build\cargo-target-webview2\release\tabburrito.exe` — **inside the cargo build
-output directory** — with the WebView2 session folder sitting next to it.
-
-Cargo target directories are disposable by definition. On **2026-08-04** a
-build-cache cleanup deleted that directory, taking every logged-in session with
-it. Recovery was impossible: the folder was gitignored (never in version
-control), File History was off, there were no restore points, and nothing was in
-the Recycle Bin.
-
-The fix is structural, not procedural — program files and user data now live in
-locations no build tool will ever touch:
-
-| What | Where | Survives rebuild? |
+| What | Where | Touched by install / update / uninstall? |
 |---|---|---|
-| Program | `%LOCALAPPDATA%\Programs\Tabburrito\` | yes |
-| Sessions / logins | `%LOCALAPPDATA%\Tabburrito\TabburritoWebViewData\` | yes |
-| Backups | `%LOCALAPPDATA%\Tabburrito\Backups\` | yes |
-| Build output | `%LOCALAPPDATA%\TabburritoBuild\` | disposable by design |
+| Program | `%LOCALAPPDATA%\Programs\Tabburrito\` | yes — replaced on every update |
+| Sessions / logins | `%LOCALAPPDATA%\Tabburrito\TabburritoWebViewData\` | **never** |
+| Backups | `%LOCALAPPDATA%\Tabburrito\Backups\` | never |
+| Update log and on/off setting | `%LOCALAPPDATA%\Tabburrito\update.log`, `update-prefs.json` | never |
 
-Per-user (`%LOCALAPPDATA%\Programs`) rather than `Program Files` is deliberate:
-it is the same convention VS Code, Slack, and Discord use, and it means the
-updater can replace the exe **without an elevation prompt**.
+Program and logins are deliberately in different folders. On **2026-08-04** a
+build-cache cleanup deleted an exe folder that also held the sessions, and every
+login was lost with no way to recover it. Tauri's stock per-user installer
+would install into `%LOCALAPPDATA%\Tabburrito` — the sessions folder — so
+Tabburrito ships a copy of the Tauri installer template with that one line
+changed (`src-tauri/windows/installer.nsi`, marked `TABBURRITO CHANGE`).
+
+Per-user (`%LOCALAPPDATA%\Programs`) rather than `Program Files` is the same
+convention VS Code, Slack and Discord use: updates need no administrator prompt.
 
 ## Install
 
+Download `Tabburrito_<version>_x64-setup.exe` from
+<https://github.com/giladfeldman/tabburrito/releases/latest> and run it.
+
+Moving from the old script-installed copy (before 0.2.0) needs nothing extra:
+the setup program installs over it in the same folder, and the logins in
+`%LOCALAPPDATA%\Tabburrito` carry over. On its first start the new version
+deletes the old `Tabburrito Auto-Update` scheduled task (which rebuilt from
+source) and the old `install-manifest.json`.
+
+The installer is not Authenticode-signed (no paid certificate), so Windows
+SmartScreen may ask "Windows protected your PC" on first install: choose
+**More info → Run anyway**. Updates are protected by a different signature,
+described below.
+
+## Automatic updates
+
+Settings → **Updates**:
+
+- **Update automatically** (on by default): a few seconds after Tabburrito
+  starts it asks GitHub for the newest release; if there is one, it downloads
+  it, checks the signature, installs it (a small progress window) and reopens.
+  While Tabburrito keeps running it checks again once a day; an update found
+  then is downloaded and checked, and waits for **Restart and install** so an
+  open conversation is never cut off.
+- **Check now** does the same check on demand.
+
+How an update is checked:
+
+1. Tabburrito reads
+   `https://github.com/giladfeldman/tabburrito/releases/latest/download/latest.json`
+   (version, installer URL, signature).
+2. If the version is newer, it downloads the installer **into memory** and
+   verifies its minisign signature against the public key compiled into the
+   app (`plugins.updater.pubkey` in `src-tauri/tauri.conf.json`).
+3. Only a file that passes is written to a temp folder and run. A failed
+   download, a modified file, or a file signed with any other key is
+   **refused**, logged with the word `REFUSED`, and the installed copy is
+   left exactly as it was.
+
+Updates run only in a copy installed by the setup program (there is an
+`uninstall.exe` beside the exe). A development build or a bare copied exe says
+so in Settings and never tries to update.
+
+Log: `%LOCALAPPDATA%\Tabburrito\update.log` (one line per check, newest last).
+
+## Uninstall
+
+Windows Settings → Apps → Tabburrito → Uninstall.
+
+**Sessions are kept.** The uninstaller removes only the program files; its
+"delete app data" option removes `%LOCALAPPDATA%\com.tabburrito.app`, not the
+logins. To delete the logins as well, delete `%LOCALAPPDATA%\Tabburrito`
+yourself afterwards — that cannot be undone.
+
+## Publishing a release (maintainer)
+
+Releases are built and signed **on the maintainer's machine** and uploaded with
+`gh`. No GitHub Actions are used.
+
+1. Set the same new version in `src-tauri/tauri.conf.json`,
+   `src-tauri/Cargo.toml` and `package.json`. Installed copies update only to a
+   **higher** version.
+2. Commit and push through `/ship`.
+3. Build, sign and upload:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\install\Publish-TabburritoRelease.ps1 -Publish -Notes "What changed."
+   ```
+
+   Without `-Publish` it is a dry run: it builds and signs into
+   `tmp\release\v<version>\` and uploads nothing. With `-Publish` it refuses
+   to run unless the build inputs are committed, the commit is on
+   `origin/main` and the tag does not exist yet; after uploading it reads
+   `latest.json` back from the public URL.
+
+The release has three files: the installer, its `.sig`, and `latest.json`.
+
+### Signing key
+
+- Private key: `%USERPROFILE%\.tauri\tabburrito-updater.key` — **outside the
+  repo, never committed.** It has no password so a build needs no prompt;
+  anyone holding the file can publish an update every installed copy accepts.
+- Public key: `%USERPROFILE%\.tauri\tabburrito-updater.key.pub`, and the same
+  text in `src-tauri/tauri.conf.json` → `plugins.updater.pubkey`.
+- **Keep a backup of the private key** (for example in a password manager).
+  If it is lost, installed copies can never verify another update and every
+  user has to reinstall by hand from a release built with a new key.
+- New key (only if the old one is lost or leaked):
+  `npx tauri signer generate --ci -w "$env:USERPROFILE\.tauri\tabburrito-updater.key"`,
+  then paste the new `.pub` text into `tauri.conf.json`. Copies installed with
+  the old key cannot update to releases signed with the new one.
+
+### Testing the updater
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install\Install-Tabburrito.ps1
+powershell -ExecutionPolicy Bypass -File .\install\Tests\Test-UpdaterEndToEnd.ps1
 ```
 
-Builds must exist first. To build from source:
+Builds a separate test product (`TabburritoE2E`, its own throwaway key, a
+local `http://127.0.0.1` endpoint) in two versions, installs the older one into
+`tmp\e2e`, and checks that a tampered installer and one signed with another key
+are refused with the installed copy untouched, that the genuine update installs
+and relaunches, and that seeded session files are unchanged. The real
+Tabburrito install and its sessions are not involved. It shows the test app's
+window while it runs and takes two release builds.
 
-```powershell
-$env:CARGO_TARGET_DIR="$env:LOCALAPPDATA\TabburritoBuild\cargo-target"
-cargo build --release --manifest-path .\src-tauri\Cargo.toml
-```
+### Upgrading the Tauri CLI
 
-## Auto-update from GitHub
+`@tauri-apps/cli` is pinned to an exact version in `package.json` because
+`src-tauri/windows/installer.nsi` is a copy of that version's template. To
+upgrade: fetch `crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi`
+from the `tauri-cli-v<new version>` tag of `tauri-apps/tauri`, re-apply the
+`TABBURRITO CHANGE` line, update the header, and run the end-to-end test.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install\Register-AutoUpdate.ps1
-```
+## Reusing this in another Tauri app
 
-Registers a hidden scheduled task that runs at logon (+5 min) and daily. Each
-run fetches the tracked remote branch; if there are new commits it fast-forwards,
-rebuilds, and reinstalls.
-
-Safety properties:
-
-- **A failed build never replaces a working install** — the installed exe is
-  only swapped after a successful compile.
-- **Uncommitted local changes block the pull** rather than being clobbered.
-- **Diverged branches abort** instead of force-merging.
-- Sessions are never touched at any point.
-
-Check manually / force a rebuild:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install\Update-Tabburrito.ps1 -Force
-```
-
-Log: `%LOCALAPPDATA%\TabburritoBuild\update.log`
+The pattern is app-agnostic: `src-tauri/src/updates.rs` (check at start +
+daily, verify-then-install, log, Settings commands), the `bundle` and
+`plugins.updater` blocks of `tauri.conf.json`, `Publish-TabburritoRelease.ps1`
+and the end-to-end test. Change the repo name, product name, key path, and —
+if the app keeps user data in `%LOCALAPPDATA%\<ProductName>` — keep the
+installer-template change.
 
 ## Back up sessions
 
@@ -101,18 +181,10 @@ unregister). The task passes `-SkipIfRunning`, so a week where Tabburrito
 happens to be open is **skipped and exits 0** rather than reporting a failure
 or capturing a torn snapshot. Manual runs still refuse outright.
 
-## Uninstall
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install\Uninstall-Tabburrito.ps1
-```
-
-**Sessions are kept by default.** Removing the program is not consent to delete
-your logins. Pass `-PurgeData` to delete them too — that is irreversible.
-
 ## Portable mode
 
-To run from a USB stick, create an empty `portable.txt` next to the exe. Data
+To run from a USB stick, create an empty `portable.txt` next to the exe (a
+copied exe like this does not update itself; replace it by hand). Data
 then lives in `<exe-dir>\TabburritoWebViewData` as before.
 
 Only do this when the exe sits in a stable folder. **Never enable portable mode

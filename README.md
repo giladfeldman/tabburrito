@@ -19,6 +19,11 @@ Source:
 - `src-tauri/`
 - `ui/`
 
+Install: download `Tabburrito_<version>_x64-setup.exe` from the
+[latest release](https://github.com/giladfeldman/tabburrito/releases/latest) and run it.
+Tabburrito then updates itself from later releases (signed; a file that fails the
+signature check is refused). No Rust or build tools are needed to run or update it.
+
 Installed exe:
 
 - `%LOCALAPPDATA%\Programs\Tabburrito\tabburrito.exe`

@@ -191,3 +191,11 @@ nothing here was recoverable.
   blanked tab stops reporting, so the badge would freeze at a stale number.
   Messaging tabs now always stay loaded unless the user switches the tab off
   (which closes it). Caught in review, 2026-11-04.
+
+## Release-Based Updates (2026-11-19)
+
+- Updates come from signed GitHub releases (Tauri updater plugin), not from `git pull` + a local rebuild. The old path needed Rust on every machine and was never verified end to end from a newer origin.
+- Tauri's stock per-user NSIS installer defaults to `%LOCALAPPDATA%\<productName>` — for Tabburrito that is the sessions folder. The repo carries the 2.10.1 template with one line changed to `%LOCALAPPDATA%\Programs\<productName>`; the CLI is pinned so the template and CLI cannot drift apart.
+- `Update::download` verifies the minisign signature over the bytes in memory before anything is written; only then does `install` write the installer and exit. Refusals are logged with the word `REFUSED`.
+- The updater's own trust is the minisign key, separate from Authenticode. The local self-signed Authenticode cert must never sign a public release (it is trusted only on this machine and looks worse than unsigned elsewhere), so the release-era scripts dropped it.
+- Test the updater with a separate product name, identifier and throwaway key, so the real install, its registry entries and its sessions are never part of the test.

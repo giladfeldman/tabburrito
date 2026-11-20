@@ -175,43 +175,59 @@ function renderAll() {
 }
 
 // --- Update section --------------------------------------------------------
+//
+// Updates are the signed releases on GitHub, handled in Rust
+// (src-tauri/src/updates.rs). This panel only shows that state and offers
+// "Check now" / "Restart and install".
 
 function formatTimestamp(raw) {
   if (!raw) return 'Never';
-  // Updater log format: "YYYY-MM-DD HH:MM:SS"
-  const d = new Date(raw.replace(' ', 'T'));
+  // Update log timestamps are ISO 8601 UTC ("2026-11-19T13:05:09Z").
+  const d = new Date(raw);
   if (isNaN(d.getTime())) return raw;
   return d.toLocaleString();
 }
 
-function renderVersion(s) {
-  // Show what is RUNNING. After an update lands, the installed exe differs
-  // from the live process until a restart — say so rather than implying the
-  // new build is already in effect.
-  $('update-version').textContent = s.runningVersion || s.version || '—';
-  const parts = [];
-  if (s.installedCommit) parts.push(`build ${s.installedCommit}`);
-  else parts.push('Running an uninstalled build');
-  if (s.restartPending) parts.push('update installed — restart to apply');
-  $('update-meta').textContent = parts.join(' · ');
+function resultClass(msg) {
+  const m = String(msg).toLowerCase();
+  if (m.includes('fail') || m.includes('refused') || m.includes('cannot') || m.includes('error')) return 'bad';
+  if (m.includes('ready') || m.includes('available') || m.includes('downloaded')) return 'warn';
+  if (m.includes('up to date')) return 'good';
+  return '';
 }
 
-async function loadUpdateStatus() {
+function renderUpdateStatus(s, { keepMessage = false } = {}) {
+  $('update-version').textContent = s.runningVersion || '—';
+  $('update-meta').textContent = s.canUpdate
+    ? 'Installed release'
+    : (s.unavailableReason || 'Updates unavailable');
+  $('set-auto-update').checked = !!s.autoUpdateEnabled;
+  $('set-auto-update').disabled = !s.canUpdate;
+  $('btn-check-update').disabled = !s.canUpdate || !!s.checking;
+  $('update-last').textContent = formatTimestamp(s.lastChecked);
+
+  const ready = $('update-ready-row');
+  if (s.pendingVersion) {
+    $('update-ready-version').textContent = `Version ${s.pendingVersion}, downloaded and verified`;
+    ready.style.display = '';
+  } else {
+    ready.style.display = 'none';
+  }
+
+  if (keepMessage) return;
+  const status = $('update-status');
+  if (s.lastResult) {
+    status.textContent = s.lastResult;
+    status.className = 'note ' + resultClass(s.lastResult);
+  } else {
+    status.textContent = '';
+    status.className = 'note';
+  }
+}
+
+async function loadUpdateStatus(opts) {
   try {
-    const s = await invoke('get_update_status');
-    renderVersion(s);
-    $('set-auto-update').checked = !!s.autoUpdateEnabled;
-    $('update-last').textContent = formatTimestamp(s.lastChecked);
-    const status = $('update-status');
-    if (s.restartPending) {
-      status.textContent = 'A newer version is installed. Restart Tabburrito to run it.';
-      status.className = 'note warn';
-    } else if (s.lastResult) {
-      status.textContent = s.lastResult;
-      status.className = 'note ' + resultClass(s.lastResult);
-    } else {
-      status.textContent = '';
-    }
+    renderUpdateStatus(await invoke('get_update_status'), opts);
   } catch (err) {
     $('update-meta').textContent = 'Update status unavailable';
     $('update-status').textContent = String(err);
@@ -219,45 +235,27 @@ async function loadUpdateStatus() {
   }
 }
 
-function resultClass(msg) {
-  const m = String(msg).toLowerCase();
-  if (m.includes('fail') || m.includes('cannot') || m.includes('error')) return 'bad';
-  if (m.includes('new version') || m.includes('available')) return 'warn';
-  if (m.includes('up to date') || m.includes('complete')) return 'good';
-  return '';
-}
-
-async function checkForUpdates() {
-  const btn = $('btn-check-update');
+async function runUpdateAction(command, busyLabel, busyText) {
+  const btn = command === 'install_update' ? $('btn-install-update') : $('btn-check-update');
+  const idle = btn.textContent;
   const status = $('update-status');
   btn.disabled = true;
-  btn.textContent = 'Checking…';
+  btn.textContent = busyLabel;
   status.className = 'note';
-  status.innerHTML = '<span class="spinner"></span>Checking for updates — this rebuilds from source and may take a few minutes.';
+  status.innerHTML = `<span class="spinner"></span>${busyText}`;
   try {
-    const out = await invoke('run_update_check', { force: false });
-    // The script logs several lines; the last one is the outcome.
-    const lines = String(out).split('\n').map(l => l.trim()).filter(Boolean);
-    const last = lines[lines.length - 1] || 'Update check finished.';
-    status.textContent = last;
-    status.className = 'note ' + resultClass(last);
-    if (/update complete/i.test(last)) {
-      status.textContent = last + ' Restart Tabburrito to run the new version.';
-      status.className = 'note good';
-    }
+    // On a successful install Tabburrito exits and the installer restarts it,
+    // so this await only ever returns with an outcome to show, or an error.
+    const msg = await invoke(command);
+    status.textContent = msg;
+    status.className = 'note ' + resultClass(msg);
   } catch (err) {
     status.textContent = String(err);
     status.className = 'note bad';
   } finally {
+    btn.textContent = idle;
     btn.disabled = false;
-    btn.textContent = 'Check now';
-    // Refresh version/last-check without clobbering the message we just set.
-    try {
-      const s = await invoke('get_update_status');
-      renderVersion(s);
-      $('update-last').textContent = formatTimestamp(s.lastChecked);
-      $('set-auto-update').checked = !!s.autoUpdateEnabled;
-    } catch {}
+    await loadUpdateStatus({ keepMessage: true });
   }
 }
 
@@ -347,8 +345,8 @@ function init() {
     try {
       await invoke('set_auto_update_enabled', { enabled: want });
       status.textContent = want
-        ? 'Automatic updates on — checks daily and 5 minutes after login.'
-        : 'Automatic updates off.';
+        ? 'Automatic updates on - checks at start and once a day.'
+        : 'Automatic updates off. Use "Check now" to update.';
       status.className = 'note good';
     } catch (err) {
       e.target.checked = !want;
@@ -357,7 +355,14 @@ function init() {
     }
   });
 
-  $('btn-check-update').addEventListener('click', checkForUpdates);
+  $('btn-check-update').addEventListener('click', () =>
+    runUpdateAction('check_for_updates', 'Checking…', 'Checking GitHub for a newer release…'));
+  $('btn-install-update').addEventListener('click', () =>
+    runUpdateAction('install_update', 'Installing…', 'Installing - Tabburrito will close and reopen in a few seconds.'));
+
+  if (window.__TAURI__?.event?.listen) {
+    window.__TAURI__.event.listen('tb-update-ready', () => loadUpdateStatus()).catch(() => {});
+  }
 
   refreshAsyncState();
   renderAll();
@@ -365,7 +370,7 @@ function init() {
 }
 
 /// Re-reads everything this panel cannot be notified about: autostart and
-/// scheduled-task/update state both live outside the app's event bus.
+/// update state both live outside the app's event bus.
 function refreshAsyncState() {
   invoke('get_autostart_enabled')
     .then((enabled) => { $('set-autostart').checked = !!enabled; })

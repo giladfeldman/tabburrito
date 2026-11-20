@@ -104,19 +104,23 @@
       <section class="settings-section">
         <h2>Updates</h2>
         <div class="row">
-          <span class="row-label">Installed version<small id="update-meta">Reading…</small></span>
+          <span class="row-label">Version<small id="update-meta">Reading…</small></span>
           <span id="update-version" class="value-badge">—</span>
         </div>
         <div class="row">
-          <span class="row-label">Check automatically<small>Daily, and 5 minutes after login</small></span>
+          <span class="row-label">Update automatically<small>Checks at start (installs then) and once a day</small></span>
           <label class="switch"><input type="checkbox" id="set-auto-update"><span class="slider"></span></label>
         </div>
         <div class="row">
           <span class="row-label">Last check<small id="update-last">Never</small></span>
           <button id="btn-check-update" class="btn">Check now</button>
         </div>
+        <div class="row" id="update-ready-row" style="display:none">
+          <span class="row-label">Update ready<small id="update-ready-version"></small></span>
+          <button id="btn-install-update" class="btn">Restart and install</button>
+        </div>
         <p class="note" id="update-status"></p>
-        <p class="note dim">Updates rebuild from source, which can take a few minutes. Your logins and sessions are never touched.</p>
+        <p class="note dim">Updates are the signed releases published on GitHub; a download whose signature does not match is refused. Your logins and sessions are never touched.</p>
       </section>
 
     </div>
