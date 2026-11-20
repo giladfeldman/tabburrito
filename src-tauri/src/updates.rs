@@ -15,10 +15,17 @@
 //!   only the program files in `%LOCALAPPDATA%\Programs\Tabburrito` and starts
 //!   the app again. Logins in `%LOCALAPPDATA%\Tabburrito` are never touched.
 //!
+//! * The version is bound to the signature: the signed (trusted) comment names
+//!   the installer file, and a file signed for another version is refused, so
+//!   an old genuine installer cannot be served as a "newer" release.
+//!
 //! Schedule: one check a few seconds after start, which installs straight away
 //! if a newer release exists (an update costs one short restart at launch);
-//! then one check every 24 hours while running, which downloads and verifies
-//! but waits for "Restart and install" so an open session is never cut off.
+//! then one check every 24 hours while running (every hour after a failed
+//! check), which downloads and verifies but waits for "Restart and install" so
+//! an open session is never cut off. If an install did not finish (the next
+//! launch still runs the old version), that version is not installed again
+//! automatically, so a failing installer cannot close the app on every start.
 //!
 //! Updates run only in a copy installed by the Tabburrito setup program
 //! (`uninstall.exe` next to the exe). A dev build or a bare copied exe has no
@@ -36,6 +43,9 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 const START_DELAY: Duration = Duration::from_secs(5);
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// After a check that failed (no network yet at login, GitHub down), try again
+/// sooner than the daily interval.
+const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// The scheduled task of the old "git pull + rebuild" updater (before 0.2.0).
 const LEGACY_TASK_NAME: &str = "Tabburrito Auto-Update";
 const LOG_MAX_BYTES: u64 = 64 * 1024;
@@ -80,6 +90,26 @@ fn log_path() -> PathBuf {
 
 fn prefs_path() -> PathBuf {
     state_dir().join("update-prefs.json")
+}
+
+/// The outcome of the last check, shown as "Last check" in Settings. Kept apart
+/// from the log so other log lines (toggling the switch, retiring the old
+/// task) never pose as a check result.
+fn status_path() -> PathBuf {
+    state_dir().join("update-status.json")
+}
+
+/// Written just before the installer starts: `{"version": "...", "failed": bool}`.
+/// The next launch compares it with the running version to learn whether the
+/// install finished - the installer itself reports nothing back.
+fn attempt_path() -> PathBuf {
+    state_dir().join("update-attempt.json")
+}
+
+fn read_json(path: PathBuf) -> Option<serde_json::Value> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
 }
 
 /// True when this exe was installed by the Tabburrito setup program.
@@ -154,6 +184,10 @@ fn now_utc() -> String {
 /// file passes LOG_MAX_BYTES. Logging must never break an update, so every
 /// error here is ignored.
 fn log(msg: &str) {
+    // The daily thread and the Settings buttons can log at the same time; the
+    // trim below rewrites the file, so serialise.
+    static LOG_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = log_path();
     let _ = fs::create_dir_all(state_dir());
     if fs::metadata(&path).map(|m| m.len() > LOG_MAX_BYTES).unwrap_or(false) {
@@ -168,14 +202,125 @@ fn log(msg: &str) {
     }
 }
 
-/// Splits the last log line into (timestamp, message).
-fn parse_last_log_line(text: &str) -> (Option<String>, Option<String>) {
-    let Some(line) = text.lines().filter(|l| !l.trim().is_empty()).next_back() else {
-        return (None, None);
+/// Logs a check outcome AND makes it the "Last check" shown in Settings.
+fn record(msg: &str) {
+    log(msg);
+    let body = serde_json::json!({ "checked": now_utc(), "result": msg }).to_string();
+    // Write beside, then rename: Settings may read the file at any moment.
+    let tmp = status_path().with_extension("json.tmp");
+    if fs::write(&tmp, body).is_ok() {
+        let _ = fs::rename(&tmp, status_path());
+    }
+}
+
+fn read_status() -> (Option<String>, Option<String>) {
+    match read_json(status_path()) {
+        Some(v) => (
+            v.get("checked").and_then(|x| x.as_str()).map(str::to_string),
+            v.get("result").and_then(|x| x.as_str()).map(str::to_string),
+        ),
+        None => (None, None),
+    }
+}
+
+// --- Version checks ----------------------------------------------------------
+
+/// Numeric parts of "1.2.3" (pre-release suffixes ignored). Enough for our own
+/// x.y.z release numbers.
+fn version_parts(v: &str) -> Vec<u64> {
+    v.trim_start_matches('v')
+        .split(['-', '+'])
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .map(|p| p.parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+fn version_at_least(have: &str, want: &str) -> bool {
+    let (a, b) = (version_parts(have), version_parts(want));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x > y;
+        }
+    }
+    true
+}
+
+/// The version a signature was made for, read from its TRUSTED comment (which
+/// minisign's global signature covers, so it can only be trusted after the
+/// plugin's `download` has verified the signature). Newer Tauri CLIs write
+/// `version:X`; 2.10.1 writes only `file:<Product>_<X>_x64-setup.exe`.
+/// Binding the version stops an old, genuinely signed installer from being
+/// served under a newer version number (a rollback).
+fn signed_version(signature_b64: &str) -> Option<String> {
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(signature_b64.trim())
+        .ok()?;
+    let text = String::from_utf8(raw).ok()?;
+    let comment = text
+        .lines()
+        .find_map(|l| l.strip_prefix("trusted comment: "))?;
+    let fields: Vec<&str> = comment.split('\t').collect();
+    if let Some(v) = fields.iter().find_map(|f| f.strip_prefix("version:")) {
+        return Some(v.trim().to_string());
+    }
+    let file = fields.iter().find_map(|f| f.strip_prefix("file:"))?;
+    let stem = file.trim().strip_suffix("_x64-setup.exe")?;
+    stem.rsplit_once('_').map(|(_, v)| v.to_string())
+}
+
+/// True for errors that mean "this file is not a genuine release", as opposed
+/// to a network or server problem.
+fn is_signature_error(e: &tauri_plugin_updater::Error) -> bool {
+    use tauri_plugin_updater::Error as E;
+    matches!(
+        e,
+        E::Minisign(_)
+            | E::Base64(_)
+            | E::SignatureUtf8(_)
+            | E::SignedVersionMismatch { .. }
+            | E::MissingSignedVersion
+    )
+}
+
+// --- Install attempts ----------------------------------------------------------
+
+/// Version of an earlier install attempt that did not finish, if any.
+fn failed_attempt() -> Option<String> {
+    let v = read_json(attempt_path())?;
+    if v.get("failed").and_then(|f| f.as_bool()).unwrap_or(false) {
+        v.get("version").and_then(|x| x.as_str()).map(str::to_string)
+    } else {
+        None
+    }
+}
+
+fn write_attempt(version: &str, failed: bool) {
+    let body = serde_json::json!({ "version": version, "failed": failed }).to_string();
+    let _ = fs::write(attempt_path(), body);
+}
+
+/// Called at start: did the last install finish? The installer exits this
+/// process and reports nothing, so the only evidence is which version is now
+/// running. A failed attempt is remembered so the start-up check does not
+/// close the app again for the same version on every launch.
+fn reconcile_attempt(running: &str) {
+    let Some(v) = read_json(attempt_path()) else { return };
+    let Some(attempted) = v.get("version").and_then(|x| x.as_str()).map(str::to_string) else {
+        let _ = fs::remove_file(attempt_path());
+        return;
     };
-    match line.strip_prefix('[').and_then(|r| r.split_once("] ")) {
-        Some((ts, msg)) => (Some(ts.to_string()), Some(msg.to_string())),
-        None => (None, Some(line.to_string())),
+    if version_at_least(running, &attempted) {
+        let _ = fs::remove_file(attempt_path());
+        record(&format!("Updated to version {running}."));
+    } else if failed_attempt().is_none() {
+        write_attempt(&attempted, true);
+        record(&format!(
+            "Installing {attempted} did not finish - still running {running}. It will not be retried automatically; use \"Check now\" and then \"Restart and install\" to try again."
+        ));
     }
 }
 
@@ -223,7 +368,10 @@ fn hide_console(cmd: &mut std::process::Command) {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
-    /// Install as soon as a verified update is in hand (start-up check, button).
+    /// Start-up check: install straight away, unless this same version
+    /// already failed to install once (then stage it and wait for the user).
+    Auto,
+    /// "Restart and install": install now, also retrying a failed version.
     InstallNow,
     /// Download and verify, then wait for the user (daily check, "Check now").
     Stage,
@@ -239,6 +387,8 @@ fn pending_version(state: &UpdateState) -> Option<String> {
 
 fn install(update: &Update, bytes: &[u8]) -> Result<String, String> {
     log(&format!("Installing {} - Tabburrito will restart.", update.version));
+    // Checked at the next launch by reconcile_attempt().
+    write_attempt(&update.version, false);
     // On Windows a successful install() starts the installer and EXITS this
     // process, so only the error branch ever returns here.
     match update.install(bytes) {
@@ -248,7 +398,8 @@ fn install(update: &Update, bytes: &[u8]) -> Result<String, String> {
                 "Installing {} failed: {e}. The installed version is untouched.",
                 update.version
             );
-            log(&msg);
+            write_attempt(&update.version, true);
+            record(&msg);
             Err(msg)
         }
     }
@@ -265,7 +416,7 @@ async fn run_check(app: &AppHandle, mode: Mode) -> Result<String, String> {
     // A verified download already waiting: install it or report it.
     let staged = state.pending.lock().map_err(|e| e.to_string())?.take();
     if let Some((update, bytes)) = staged {
-        if mode == Mode::InstallNow {
+        if mode != Mode::Stage {
             let result = install(&update, &bytes);
             // Still here means the install failed; keep the download.
             *state.pending.lock().map_err(|e| e.to_string())? = Some((update, bytes));
@@ -289,7 +440,7 @@ async fn run_check(app: &AppHandle, mode: Mode) -> Result<String, String> {
         .build()
         .map_err(|e| {
             let msg = format!("Update check failed: {e}");
-            log(&msg);
+            record(&msg);
             msg
         })?;
 
@@ -297,12 +448,12 @@ async fn run_check(app: &AppHandle, mode: Mode) -> Result<String, String> {
         Ok(Some(u)) => u,
         Ok(None) => {
             let msg = format!("Up to date (version {current}).");
-            log(&msg);
+            record(&msg);
             return Ok(msg);
         }
         Err(e) => {
             let msg = format!("Update check failed: {e}");
-            log(&msg);
+            record(&msg);
             return Err(msg);
         }
     };
@@ -312,28 +463,45 @@ async fn run_check(app: &AppHandle, mode: Mode) -> Result<String, String> {
     let bytes = match update.download(|_, _| {}, || {}).await {
         Ok(b) => b,
         Err(e) => {
-            let msg = format!(
-                "Version {version} REFUSED - download or signature check failed: {e}. The installed version is untouched."
-            );
-            log(&msg);
+            let msg = if is_signature_error(&e) {
+                format!("Version {version} REFUSED - signature check failed: {e}. The installed version is untouched.")
+            } else {
+                format!("Downloading version {version} failed: {e}. The installed version is untouched; it will try again later.")
+            };
+            record(&msg);
             return Err(msg);
         }
     };
+    // `download` has verified the signature, so its trusted comment is genuine.
+    match signed_version(&update.signature) {
+        Some(signed) if signed == version => {}
+        other => {
+            let msg = format!(
+                "Version {version} REFUSED - signature check failed: the installer was signed for version {}, not {version}. The installed version is untouched.",
+                other.as_deref().unwrap_or("(none recorded)")
+            );
+            record(&msg);
+            return Err(msg);
+        }
+    }
     log(&format!(
         "Version {version} downloaded and signature verified ({} bytes).",
         bytes.len()
     ));
 
-    match mode {
-        Mode::InstallNow => install(&update, &bytes),
-        Mode::Stage => {
-            *state.pending.lock().map_err(|e| e.to_string())? = Some((update, bytes));
-            let msg = format!("Version {version} is ready - restart to install.");
-            log(&msg);
-            let _ = app.emit("tb-update-ready", version);
-            Ok(msg)
-        }
+    let stage = match mode {
+        Mode::Stage => true,
+        Mode::InstallNow => false,
+        Mode::Auto => failed_attempt().as_deref() == Some(version.as_str()),
+    };
+    if !stage {
+        return install(&update, &bytes);
     }
+    *state.pending.lock().map_err(|e| e.to_string())? = Some((update, bytes));
+    let msg = format!("Version {version} is ready - restart to install.");
+    record(&msg);
+    let _ = app.emit("tb-update-ready", version);
+    Ok(msg)
 }
 
 fn not_installed_reason() -> String {
@@ -347,22 +515,28 @@ fn not_installed_reason() -> String {
 /// Called once from `setup`. Retires the old updater, then runs the start-up
 /// check and the daily check on a background thread.
 pub fn start(app: &AppHandle) {
+    // The old task must go even from a copy the old script updated in place
+    // (no uninstall.exe), or it keeps rebuilding from source - possibly over a
+    // release installed later. Dev builds and portable copies are left alone.
+    if !is_portable() && !cfg!(debug_assertions) {
+        retire_legacy_updater();
+    }
     if !is_setup_install() {
         return;
     }
-    if !is_portable() {
-        retire_legacy_updater();
-    }
+    reconcile_attempt(&app.package_info().version.to_string());
     let handle = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(START_DELAY);
-        let mut mode = Mode::InstallNow;
+        let mut mode = Mode::Auto;
         loop {
-            if auto_enabled() {
-                let _ = tauri::async_runtime::block_on(run_check(&handle, mode));
-            }
+            let ok = if auto_enabled() {
+                tauri::async_runtime::block_on(run_check(&handle, mode)).is_ok()
+            } else {
+                true
+            };
             mode = Mode::Stage;
-            std::thread::sleep(CHECK_INTERVAL);
+            std::thread::sleep(if ok { CHECK_INTERVAL } else { RETRY_INTERVAL });
         }
     });
 }
@@ -387,10 +561,7 @@ pub struct UpdateStatusPayload {
 pub async fn get_update_status(app: AppHandle) -> Result<UpdateStatusPayload, String> {
     let state = app.state::<UpdateState>();
     let can_update = is_setup_install();
-    let (last_checked, last_result) = match fs::read_to_string(log_path()) {
-        Ok(text) => parse_last_log_line(&text),
-        Err(_) => (None, None),
-    };
+    let (last_checked, last_result) = read_status();
     Ok(UpdateStatusPayload {
         running_version: app.package_info().version.to_string(),
         can_update,
@@ -442,18 +613,48 @@ mod tests {
         assert_eq!(utc_timestamp(20_776 * 86_400 + 13 * 3600 + 5 * 60 + 9), "2026-11-19T13:05:09Z");
     }
 
-    #[test]
-    fn last_log_line_is_split_into_time_and_message() {
-        let text = "[2026-11-19T10:00:00Z] first\n[2026-11-19T11:00:00Z] Up to date (version 0.2.0).\n\n";
-        assert_eq!(
-            parse_last_log_line(text),
-            (
-                Some("2026-11-19T11:00:00Z".to_string()),
-                Some("Up to date (version 0.2.0).".to_string())
-            )
+    fn sig_with_comment(comment: &str) -> String {
+        use base64::Engine;
+        let text = format!(
+            "untrusted comment: signature from tauri secret key
+RUQAAAAA
+trusted comment: {comment}
+AAAA
+"
         );
-        assert_eq!(parse_last_log_line(""), (None, None));
-        assert_eq!(parse_last_log_line("no stamp"), (None, Some("no stamp".to_string())));
+        base64::engine::general_purpose::STANDARD.encode(text)
+    }
+
+    #[test]
+    fn signed_version_comes_from_the_trusted_comment() {
+        // Tauri CLI 2.10.1 form (file name only), as in the real 0.2.0 signature.
+        assert_eq!(
+            signed_version(&sig_with_comment("timestamp:1795141467	file:Tabburrito_0.2.0_x64-setup.exe")),
+            Some("0.2.0".to_string())
+        );
+        // Product names with underscores still split on the LAST one.
+        assert_eq!(
+            signed_version(&sig_with_comment("timestamp:1	file:Tab_E2E_0.2.1_x64-setup.exe")),
+            Some("0.2.1".to_string())
+        );
+        // Newer CLIs record the version explicitly; that wins.
+        assert_eq!(
+            signed_version(&sig_with_comment("timestamp:1	file:x.exe	version:1.4.0")),
+            Some("1.4.0".to_string())
+        );
+        assert_eq!(signed_version(&sig_with_comment("timestamp:1")), None);
+        assert_eq!(signed_version(&sig_with_comment("timestamp:1	file:other.msi")), None);
+        assert_eq!(signed_version("not base64 !!"), None);
+    }
+
+    #[test]
+    fn version_ordering() {
+        assert!(version_at_least("0.2.1", "0.2.1"));
+        assert!(version_at_least("0.2.10", "0.2.9"));
+        assert!(version_at_least("1.0.0", "0.9.9"));
+        assert!(!version_at_least("0.2.0", "0.2.1"));
+        assert!(!version_at_least("0.2", "0.2.1"));
+        assert!(version_at_least("v0.3.0", "0.2.9"));
     }
 
     #[test]

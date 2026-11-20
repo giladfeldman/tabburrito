@@ -190,9 +190,9 @@ function formatTimestamp(raw) {
 
 function resultClass(msg) {
   const m = String(msg).toLowerCase();
-  if (m.includes('fail') || m.includes('refused') || m.includes('cannot') || m.includes('error')) return 'bad';
+  if (m.includes('fail') || m.includes('refused') || m.includes('cannot') || m.includes('error') || m.includes('did not finish')) return 'bad';
   if (m.includes('ready') || m.includes('available') || m.includes('downloaded')) return 'warn';
-  if (m.includes('up to date')) return 'good';
+  if (m.includes('up to date') || m.includes('updated to')) return 'good';
   return '';
 }
 
@@ -251,7 +251,8 @@ async function runUpdateAction(command, busyLabel, busyText) {
     status.className = 'note ' + resultClass(msg);
   } catch (err) {
     status.textContent = String(err);
-    status.className = 'note bad';
+    // A check already in progress is a normal state, not an error.
+    status.className = String(err).includes('already running') ? 'note' : 'note bad';
   } finally {
     btn.textContent = idle;
     btn.disabled = false;

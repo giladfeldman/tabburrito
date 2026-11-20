@@ -206,3 +206,10 @@ Session sync is the risky part and is deliberately NOT bundled with it.
 - [ ] [LOW · later · val:low · M · opus-medium] Purge compiled Rust build artifacts (tabburrito-lite/src-tauri/target) from public git history (src: publication-text-scan --history: 65 rlib/rmeta suspects) ^d-c4d3f1
 - [ ] [MED · soon · val:med · S · sonnet-medium] Hide LinkedIn right-rail 'Promoted' ad card (feed posts are hidden; side-column ad still shows) (src: post-install window capture 2026-11-04) ^d-d74090
 - [ ] [LOW · soon · val:med · S · sonnet-medium] Confirm Messenger badge stays live past the idle-unload grace period with notify mode Off (src: review fix service_should_keep_loaded; live check needs grace period) ^d-51202e
+
+## Install
+
+- [ ] [MED · soon · val:med · M · opus-medium] Keep the updater signing key out of the tauri build environment (sign after building) (src: install/Publish-TabburritoRelease.ps1 (TAURI_SIGNING_PRIVATE_KEY set for the whole npx tauri build; every build.rs inherits it)) ^d-c0c900
+- [ ] [LOW · later · val:med · S · sonnet-medium] Surface a staged update outside the Settings panel (sidebar badge) (src: src-tauri/src/updates.rs tb-update-ready only refreshes Settings) ^d-2acf06
+- [ ] [LOW · later · val:low · S · sonnet-medium] Check whether a manual reinstall of a newer setup drops the Start-at-login entry (src: src-tauri/windows/installer.nsi PageLeaveReinstall uninstall path (consult 2026-11-20, unverified)) ^d-4c5dfc
+- [ ] [LOW · later · val:low · M · opus-medium] Close WebView2 cleanly before the updater exits the process (src: src-tauri/src/updates.rs install(): update.install exits without webview shutdown (consult 2026-11-20)) ^d-df6763

@@ -134,6 +134,6 @@ This software is licensed under the [GNU Affero General Public License v3.0](LIC
 
 **How to cite.** If you use this software in research, please cite it. GitHub's *Cite this repository* button (from [CITATION.cff](CITATION.cff)) gives APA and BibTeX. In APA style:
 
-> Feldman, G. (2026). *tabburrito: Portable multi-service web app dock built with Tauri and WebView2* (Version 0.1.0) [Computer software]. https://github.com/giladfeldman/tabburrito
+> Feldman, G. (2026). *tabburrito: Portable multi-service web app dock built with Tauri and WebView2* (Version 0.2.0) [Computer software]. https://github.com/giladfeldman/tabburrito
 
 <!-- license-citation:end -->

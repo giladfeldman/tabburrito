@@ -34,6 +34,17 @@ the setup program installs over it in the same folder, and the logins in
 deletes the old `Tabburrito Auto-Update` scheduled task (which rebuilt from
 source) and the old `install-manifest.json`.
 
+One wrinkle: the old copy's entry in Windows "Apps" points at the old
+uninstall script, which no longer exists. If the setup program offers
+**Uninstall before installing**, choose **Do not uninstall** instead (or it
+reports "unable to uninstall" and returns to that page). To avoid the question,
+remove the stale entry first - this deletes only that registry entry, and only
+if it is the old script's:
+
+```powershell
+$k = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Tabburrito'; if ((Get-ItemProperty $k -ErrorAction SilentlyContinue).UninstallString -like '*Uninstall-Tabburrito.ps1*') { Remove-Item $k }
+```
+
 The installer is not Authenticode-signed (no paid certificate), so Windows
 SmartScreen may ask "Windows protected your PC" on first install: choose
 **More info → Run anyway**. Updates are protected by a different signature,
@@ -59,16 +70,29 @@ How an update is checked:
 2. If the version is newer, it downloads the installer **into memory** and
    verifies its minisign signature against the public key compiled into the
    app (`plugins.updater.pubkey` in `src-tauri/tauri.conf.json`).
-3. Only a file that passes is written to a temp folder and run. A failed
-   download, a modified file, or a file signed with any other key is
-   **refused**, logged with the word `REFUSED`, and the installed copy is
-   left exactly as it was.
+3. It also checks that the signature was made **for that version**: the signed
+   comment names the installer file (`Tabburrito_<version>_x64-setup.exe`), so
+   an old genuine installer served as a "newer" release (a rollback) is refused.
+4. Only a file that passes is written to a temp folder and run. A modified
+   file, a file signed with any other key, or one signed for another version is
+   **refused** (`REFUSED - signature check failed` in the log) and the
+   installed copy is left exactly as it was. A network or server problem is
+   logged as `Downloading ... failed` and retried an hour later.
+
+The installer reports nothing back, so the next start compares the running
+version with the one it tried to install. If the install did not finish, that
+version is **not installed again automatically** (a broken installer cannot
+close Tabburrito on every start); Settings says so, and **Check now** then
+**Restart and install** retries it.
 
 Updates run only in a copy installed by the setup program (there is an
 `uninstall.exe` beside the exe). A development build or a bare copied exe says
 so in Settings and never tries to update.
 
-Log: `%LOCALAPPDATA%\Tabburrito\update.log` (one line per check, newest last).
+Log: `%LOCALAPPDATA%\Tabburrito\update.log` (newest last). The "Last check"
+line in Settings comes from `update-status.json` beside it, written only by
+checks; `update-attempt.json` exists only between an install and the next
+start.
 
 ## Uninstall
 
@@ -97,8 +121,13 @@ Releases are built and signed **on the maintainer's machine** and uploaded with
    Without `-Publish` it is a dry run: it builds and signs into
    `tmp\release\v<version>\` and uploads nothing. With `-Publish` it refuses
    to run unless the build inputs are committed, the commit is on
-   `origin/main` and the tag does not exist yet; after uploading it reads
-   `latest.json` back from the public URL.
+   `origin/main` (after a fetch that must succeed), neither the release nor
+   the tag exists yet, and the version is higher than the current latest
+   release; it re-checks HEAD and the build inputs after the build. Every run
+   checks that the installed Tauri CLI is the pinned one and that the
+   installer is signed with the key whose public half the app trusts. After
+   uploading it reads `latest.json` back from the public URL and compares the
+   version and the signature.
 
 The release has three files: the installer, its `.sig`, and `latest.json`.
 
@@ -123,13 +152,29 @@ The release has three files: the installer, its `.sig`, and `latest.json`.
 powershell -ExecutionPolicy Bypass -File .\install\Tests\Test-UpdaterEndToEnd.ps1
 ```
 
-Builds a separate test product (`TabburritoE2E`, its own throwaway key, a
-local `http://127.0.0.1` endpoint) in two versions, installs the older one into
-`tmp\e2e`, and checks that a tampered installer and one signed with another key
-are refused with the installed copy untouched, that the genuine update installs
-and relaunches, and that seeded session files are unchanged. The real
-Tabburrito install and its sessions are not involved. It shows the test app's
-window while it runs and takes two release builds.
+Builds a separate test product (`TabburritoE2E`, its own exe name, identifier
+and throwaway key, a local `http://127.0.0.1` endpoint) in two versions,
+installs the older one with the setup program's default folder
+(`%LOCALAPPDATA%\Programs\TabburritoE2E`, which exercises the patched
+template), and checks:
+
+- a tampered installer and one signed with another key are refused as
+  signature failures, with the installed copy unchanged and still running;
+- a version remembered as a failed install is staged, not auto-installed;
+- the genuine update installs, relaunches, logs "Updated to version", and the
+  relaunched copy renders Settings with the new version (read through
+  WebView2's DevTools port by `install/Tests/cdp_settings_probe.py`);
+- seeded session files are unchanged;
+- an old genuine installer served as a newer version is refused, and an
+  unfinished install is detected and remembered;
+- uninstall removes the program and leaves the sessions folder.
+
+Limits: the test copy runs in portable mode (its data beside its exe), so the
+real `%LOCALAPPDATA%\Tabburrito` layout, the retiring of the old scheduled task
+and an upgrade over an old script install are not exercised; the real
+release's signing key is checked by the publish script instead. The real
+Tabburrito install and its sessions are not involved. The test shows its
+app's window while it runs and takes two release builds.
 
 ### Upgrading the Tauri CLI
 

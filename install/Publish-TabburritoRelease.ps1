@@ -124,6 +124,22 @@ Write-Host "Tabburrito $version" -ForegroundColor Cyan
 if (-not $OutDir)  { $OutDir  = Join-Path $RepoRoot "tmp\release\$tag" }
 if (-not $BaseUrl) { $BaseUrl = "https://github.com/$Repo/releases/download/$tag" }
 
+# The output folder is emptied before use, so refuse one holding anything a
+# release run did not put there (a mistyped -OutDir must not wipe a folder).
+if (Test-Path -LiteralPath $OutDir) {
+    $foreign = @(Get-ChildItem -LiteralPath $OutDir -Force | Where-Object {
+        $_.PSIsContainer -or ($_.Name -notmatch '(_x64-setup\.exe(\.sig)?|^latest\.json)$') })
+    if ($foreign.Count) { Fail "-OutDir $OutDir holds other files ($($foreign[0].Name)); choose an empty or release-only folder." }
+}
+
+# The NSIS template in src-tauri\windows is a copy of the pinned CLI's own; a
+# different installed CLI would build with a template it was not made for.
+$pinned = (Get-Content -Raw -LiteralPath (Join-Path $RepoRoot 'package.json') | ConvertFrom-Json).devDependencies.'@tauri-apps/cli'
+$cliPkg = Join-Path $RepoRoot 'node_modules\@tauri-apps\cli\package.json'
+if (-not (Test-Path -LiteralPath $cliPkg)) { Fail "Tauri CLI not installed. Run 'npm ci' first." }
+$installedCli = (Get-Content -Raw -LiteralPath $cliPkg | ConvertFrom-Json).version
+if ($installedCli -ne $pinned) { Fail "Installed Tauri CLI is $installedCli but package.json pins $pinned. Run 'npm ci'." }
+
 # --- 2. Publish pre-checks (before the slow build) -------------------------
 $headSha = (& git -C $RepoRoot rev-parse HEAD).Trim()
 if ($Publish) {
@@ -133,12 +149,30 @@ if ($Publish) {
     $dirty = & git -C $RepoRoot status --porcelain -- @buildInputs
     if ($dirty) { Fail "Uncommitted changes in build inputs:`n$($dirty -join "`n")" }
 
-    Invoke-Native { git -C $RepoRoot fetch --quiet origin } | Out-Null
+    $fetchOut = Invoke-Native { git -C $RepoRoot fetch --quiet --tags origin }
+    if ($LASTEXITCODE -ne 0) { Fail "git fetch failed, so origin/main may be stale: $($fetchOut -join ' ')" }
     & git -C $RepoRoot merge-base --is-ancestor $headSha origin/main
     if ($LASTEXITCODE -ne 0) { Fail "HEAD $($headSha.Substring(0,7)) is not on origin/main. Push first (through /ship)." }
 
     Invoke-Native { gh release view $tag --repo $Repo } | Out-Null
     if ($LASTEXITCODE -eq 0) { Fail "Release $tag already exists on GitHub. Bump the version." }
+    # A leftover tag without a release would make `gh release create` reuse it
+    # and ignore --target, so the tag would not point at the built code.
+    $remoteTag = Invoke-Native { git -C $RepoRoot ls-remote --tags origin "refs/tags/$tag" }
+    if ($LASTEXITCODE -ne 0) { Fail "git ls-remote failed: $($remoteTag -join ' ')" }
+    if (($remoteTag -join '').Trim()) { Fail "Tag $tag already exists on origin (without a release). Delete it or bump the version." }
+
+    # Installed copies only move to a HIGHER version; publishing a lower one as
+    # "latest" would stall every update.
+    $latestTag = ((Invoke-Native { gh release view --repo $Repo --json tagName --jq .tagName }) -join ' ').Trim()
+    if ($LASTEXITCODE -ne 0) {
+        # The very first release has no "latest" yet; anything else is a real failure.
+        if ($latestTag -notmatch 'release not found') { Fail "Could not read the latest release: $latestTag" }
+    } elseif ($latestTag -match '^v?(\d+\.\d+\.\d+)$') {
+        if ([version]$Matches[1] -ge [version]$version) { Fail "The latest release is $latestTag; $tag must be higher." }
+    } else {
+        Fail "The latest release tag '$latestTag' is not vMAJOR.MINOR.PATCH; check it by hand."
+    }
 }
 
 # --- 3. Build and sign ---------------------------------------------------
@@ -190,6 +224,45 @@ $setup = $setup[0]
 $sigPath = "$($setup.FullName).sig"
 if (-not (Test-Path -LiteralPath $sigPath)) { Fail "No signature next to the installer ($sigPath). Was the signing key picked up?" }
 
+# The signing key must be the one whose PUBLIC half the app trusts, or every
+# installed copy would refuse this release. minisign key id = bytes 2..9 of the
+# second line of the decoded key / signature.
+function Get-MinisignKeyId([string]$b64File) {
+    $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64File.Trim()))
+    $bytes = [Convert]::FromBase64String(($text -split "`n")[1].Trim())
+    -join ($bytes[2..9] | ForEach-Object { $_.ToString('x2') })
+}
+$trustedPub = $conf.plugins.updater.pubkey
+if ($ConfigOverride) {
+    $ov = Get-Content -Raw -LiteralPath $ConfigOverride | ConvertFrom-Json
+    if ($ov.PSObject.Properties['plugins'] -and $ov.plugins.PSObject.Properties['updater'] -and
+        $ov.plugins.updater.PSObject.Properties['pubkey']) { $trustedPub = $ov.plugins.updater.pubkey }
+}
+$sigKey = Get-MinisignKeyId (Get-Content -Raw -LiteralPath $sigPath)
+$appKey = Get-MinisignKeyId $trustedPub
+if ($sigKey -ne $appKey) { Fail "The installer is signed with key $sigKey but the app trusts key $appKey. Wrong -KeyPath or a regenerated key?" }
+
+# The app refuses an installer unless the signature's trusted comment names
+# this version (version:X, or file:<Product>_X_x64-setup.exe) - see
+# signed_version() in src-tauri/src/updates.rs. A CLI that wrote another format
+# would publish a release every copy refuses.
+$sigText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Get-Content -Raw -LiteralPath $sigPath).Trim()))
+$trusted = (($sigText -split "`n") | Where-Object { $_ -like 'trusted comment: *' } | Select-Object -First 1)
+$fields = if ($trusted) { $trusted.Substring(17).Trim() -split "`t" } else { @() }
+$signedVersion = ($fields | Where-Object { $_ -like 'version:*' } | ForEach-Object { $_.Substring(8) } | Select-Object -First 1)
+if (-not $signedVersion) {
+    $file = ($fields | Where-Object { $_ -like 'file:*' } | ForEach-Object { $_.Substring(5) } | Select-Object -First 1)
+    if ($file -match '_([^_]+)_x64-setup\.exe$') { $signedVersion = $Matches[1] }
+}
+if ($signedVersion -ne $version) { Fail "The signature's trusted comment names version '$signedVersion', not $version; installed copies would refuse it. Comment: $trusted" }
+
+if ($Publish) {
+    # Nothing may change between the checks above and the upload.
+    if ((& git -C $RepoRoot rev-parse HEAD).Trim() -ne $headSha) { Fail 'HEAD moved during the build. Run again.' }
+    $dirtyAfter = & git -C $RepoRoot status --porcelain -- @buildInputs
+    if ($dirtyAfter) { Fail "Build inputs changed during the build:`n$($dirtyAfter -join "`n")" }
+}
+
 # --- 4. Collect files and write latest.json -------------------------------
 if (Test-Path -LiteralPath $OutDir) { Remove-Item -LiteralPath $OutDir -Recurse -Force }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -231,6 +304,7 @@ Write-Host "Published: https://github.com/$Repo/releases/tag/$tag" -ForegroundCo
 $liveUrl = "https://github.com/$Repo/releases/latest/download/latest.json"
 $live = Invoke-RestMethod -Uri $liveUrl -UseBasicParsing
 if ($live.version -ne $version) { Fail "$liveUrl reports version '$($live.version)', expected $version." }
+if ($live.platforms.'windows-x86_64'.signature -ne $signature) { Fail "$liveUrl carries a different signature than the one just built." }
 $asset = Invoke-WebRequest -Uri $live.platforms.'windows-x86_64'.url -Method Head -UseBasicParsing -MaximumRedirection 5
 Write-Host "Verified: latest.json reports $version; installer URL answers $($asset.StatusCode)." -ForegroundColor Green
 exit 0

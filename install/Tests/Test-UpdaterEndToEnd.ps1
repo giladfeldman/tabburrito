@@ -41,13 +41,16 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot   = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Publisher  = Join-Path $RepoRoot 'install\Publish-TabburritoRelease.ps1'
 $Work       = Join-Path $RepoRoot 'tmp\e2e'
-$InstallDir = Join-Path $Work 'install'
+# Installed WITHOUT /D, so the patched default install folder of the template
+# (src-tauri\windows\installer.nsi) is what is exercised.
+$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\TabburritoE2E"
 $Serve      = Join-Path $Work 'serve'
 $Product    = 'TabburritoE2E'
 $VersionA   = '0.2.0'
 $VersionB   = '0.2.1'
 $Exe        = Join-Path $InstallDir "$Product.exe"
 $Log        = Join-Path $InstallDir 'update.log'
+$Attempt    = Join-Path $InstallDir 'update-attempt.json'
 $Sessions   = Join-Path $InstallDir 'TabburritoWebViewData'
 $TargetDir  = $CargoTargetDir
 
@@ -96,17 +99,9 @@ function Wait-Until([scriptblock]$Condition, [int]$Seconds) {
     }
     return [bool](& $Condition)
 }
-function Get-TreeHash([string]$Dir) {
-    $lines = Get-ChildItem -LiteralPath $Dir -Recurse -File | Sort-Object FullName | ForEach-Object {
-        '{0} {1}' -f $_.FullName.Substring($Dir.Length), (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
-    }
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    ([BitConverter]::ToString($sha.ComputeHash($bytes))) -replace '-', ''
-}
-function Set-Served([string]$InstallerName, [string]$Signature) {
+function Set-Served([string]$InstallerName, [string]$Signature, [string]$Version = $VersionB) {
     $manifest = [ordered]@{
-        version   = $VersionB
+        version   = $Version
         notes     = 'e2e'
         pub_date  = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         platforms = [ordered]@{
@@ -119,12 +114,15 @@ function Set-Served([string]$InstallerName, [string]$Signature) {
 $server = $null
 try {
     # --- Setup: throwaway keys and test config --------------------------------
+    Stop-TestApp
+    $oldUninstaller = Join-Path $InstallDir 'uninstall.exe'
+    if (Test-Path -LiteralPath $oldUninstaller) { Start-Process -FilePath $oldUninstaller -ArgumentList '/S' -Wait }
+    if (Test-Path -LiteralPath $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
+    # A remembered install folder from an earlier run would override the default.
+    Remove-Item -LiteralPath "HKCU:\Software\tabburrito\$Product" -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $Work) {
-        Stop-TestApp
-        $oldUninstaller = Join-Path $InstallDir 'uninstall.exe'
-        if (Test-Path -LiteralPath $oldUninstaller) { Start-Process -FilePath $oldUninstaller -ArgumentList '/S' -Wait }
         if ($SkipBuild) {
-            foreach ($d in $InstallDir, $Serve) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force } }
+            if (Test-Path -LiteralPath $Serve) { Remove-Item -LiteralPath $Serve -Recurse -Force }
         } else {
             Remove-Item -LiteralPath $Work -Recurse -Force
         }
@@ -176,11 +174,14 @@ try {
     }
     $setupA = Join-Path $Work "build-$VersionA\${Product}_${VersionA}_x64-setup.exe"
     $setupB = Join-Path $Work "build-$VersionB\${Product}_${VersionB}_x64-setup.exe"
+    $sigA   = (Get-Content -Raw -LiteralPath "$setupA.sig").Trim()
     $sigB   = (Get-Content -Raw -LiteralPath "$setupB.sig").Trim()
 
     # Served files: genuine B, tampered B (one extra byte), B signed by another key.
     $nameB = Split-Path -Leaf $setupB
     Copy-Item -LiteralPath $setupB -Destination (Join-Path $Serve $nameB)
+    $nameA = Split-Path -Leaf $setupA
+    Copy-Item -LiteralPath $setupA -Destination (Join-Path $Serve $nameA)
     $tampered = Join-Path $Serve "tampered-$nameB"
     Copy-Item -LiteralPath $setupB -Destination $tampered
     $fs = [System.IO.File]::Open($tampered, 'Append'); $fs.WriteByte(0); $fs.Close()
@@ -195,8 +196,10 @@ try {
     $sigOther = (Get-Content -Raw -LiteralPath "$otherSigned.sig").Trim()
 
     # --- Install A ----------------------------------------------------------
-    Start-Process -FilePath $setupA -ArgumentList '/S', '/NS', "/D=$InstallDir" -Wait
-    Check 'install A' ((Get-ExeVersion) -eq $VersionA) "exe version '$(Get-ExeVersion)'"
+    Start-Process -FilePath $setupA -ArgumentList '/S', '/NS' -Wait
+    Check 'install A into %LOCALAPPDATA%\Programs\<product> (patched default, not the sessions folder)' (
+        (Get-ExeVersion) -eq $VersionA -and -not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "$Product\$Product.exe"))
+    ) "exe version '$(Get-ExeVersion)' at $Exe"
     $hashA = Get-ExeHash
     Check 'installed by setup (uninstall.exe present)' (Test-Path -LiteralPath (Join-Path $InstallDir 'uninstall.exe'))
     New-Item -ItemType File -Path (Join-Path $InstallDir 'portable.txt') -Force | Out-Null
@@ -220,17 +223,32 @@ try {
         Set-Served $case.File $case.Sig
         $before = (Get-LogText).Length
         Start-Process -FilePath $Exe
-        $refused = Wait-Until { (Get-LogText).Substring([Math]::Min($before, (Get-LogText).Length)) -match 'REFUSED' } 90
+        # 'REFUSED - signature check failed' is written only for signature errors;
+        # a 404 or a dead server logs 'Downloading ... failed' instead.
+        $refused = Wait-Until { (Get-LogText).Substring([Math]::Min($before, (Get-LogText).Length)) -match 'REFUSED - signature check failed' } 90
         $newLog = (Get-LogText).Substring([Math]::Min($before, (Get-LogText).Length)).Trim()
-        Check "refuse $($case.Name)" $refused ($newLog -replace "`r?`n", ' | ')
+        # The version-binding refusal shares the prefix; these cases must be refused by the signature itself.
+        Check "refuse $($case.Name)" ($refused -and $newLog -notmatch 'signed for version') ($newLog -replace "`r?`n", ' | ')
         Start-Sleep -Seconds 2
         Check "installed copy untouched after $($case.Name)" ((Get-ExeHash) -eq $hashA) 'exe SHA-256 unchanged'
         Check "app still running after $($case.Name)" ([bool](Get-TestApp))
         Stop-TestApp
     }
 
-    # --- GOOD case ----------------------------------------------------------
+    # --- A version that failed to install before is NOT auto-installed -------
     Set-Served $nameB $sigB
+    Write-Utf8NoBom $Attempt ('{"version":"' + $VersionB + '","failed":true}')
+    $before = (Get-LogText).Length
+    Start-Process -FilePath $Exe
+    $staged = Wait-Until { (Get-LogText).Substring([Math]::Min($before, (Get-LogText).Length)) -match "Version $([regex]::Escape($VersionB)) is ready" } 90
+    Start-Sleep -Seconds 3
+    Check 'earlier failed version is staged, not auto-installed' ($staged -and (Get-ExeHash) -eq $hashA -and [bool](Get-TestApp))
+    Stop-TestApp
+    Remove-Item -LiteralPath $Attempt -Force
+
+    # --- GOOD case ----------------------------------------------------------
+    # DevTools port for the render probe; the installer passes this env on to the relaunched app.
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=0'
     $before = (Get-LogText).Length
     Start-Process -FilePath $Exe
     $installed = Wait-Until { $h = Get-ExeHash; $h -and $h -ne $hashA } 180
@@ -238,14 +256,41 @@ try {
     $relaunched = Wait-Until { (Get-LogText) -match "Up to date \(version $([regex]::Escape($VersionB))\)" } 90
     $newLog = (Get-LogText).Substring([Math]::Min($before, (Get-LogText).Length)).Trim()
     Check 'log shows verify -> install -> relaunched and up to date' (
-        $relaunched -and $newLog -match 'signature verified' -and $newLog -match "Installing $([regex]::Escape($VersionB))"
+        $relaunched -and $newLog -match 'signature verified' -and $newLog -match "Installing $([regex]::Escape($VersionB))" -and
+        $newLog -match "Updated to version $([regex]::Escape($VersionB))"
     ) ($newLog -replace "`r?`n", ' | ')
     $markerAfter = ($markerFiles | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $Sessions $_)).Hash }) -join ','
     Check 'seeded session files unchanged' ($markerAfter -eq $markerHash)
+    # The relaunched update must RENDER: open Settings and read what it shows.
+    $probeOut = & $python (Join-Path $PSScriptRoot 'cdp_settings_probe.py') $Sessions --timeout 60 | Select-Object -Last 1
+    $probe = try { $probeOut | ConvertFrom-Json } catch { $null }
+    Check 'updated app renders Settings with the new version and updates enabled' (
+        $probe -and $probe.ok -and $probe.version -eq $VersionB -and $probe.meta -eq 'Installed release' -and -not $probe.autoDisabled
+    ) "$probeOut"
+    Stop-TestApp
+    $hashB = Get-ExeHash
+
+    # --- Rollback: genuine OLD installer announced as a newer version --------
+    # plus a pretend unfinished install of a version that never arrived.
+    Set-Served $nameA $sigA '0.2.2'
+    Write-Utf8NoBom $Attempt '{"version":"0.3.0","failed":false}'
+    $before = (Get-LogText).Length
+    Start-Process -FilePath $Exe
+    $rolled = Wait-Until { (Get-LogText).Substring([Math]::Min($before, (Get-LogText).Length)) -match 'REFUSED' } 90
+    $newLog = (Get-LogText).Substring([Math]::Min($before, (Get-LogText).Length)).Trim()
+    Start-Sleep -Seconds 2
+    Check 'old genuine installer served as 0.2.2 is refused (version bound to signature)' (
+        $rolled -and $newLog -match "signed for version $([regex]::Escape($VersionA)), not 0\.2\.2" -and (Get-ExeHash) -eq $hashB
+    ) ($newLog -replace "`r?`n", ' | ')
+    $att = try { Get-Content -Raw -LiteralPath $Attempt | ConvertFrom-Json } catch { $null }
+    Check 'unfinished install is detected and remembered' (
+        $newLog -match 'Installing 0\.3\.0 did not finish' -and $att -and $att.failed -eq $true
+    )
     Stop-TestApp
 } catch {
     Check 'test harness' $false $_.Exception.Message
 } finally {
+    Remove-Item Env:\WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
     Stop-TestApp
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
     $uninstaller = Join-Path $InstallDir 'uninstall.exe'
@@ -264,6 +309,11 @@ try {
         }
         Remove-Item -LiteralPath (Join-Path $env:APPDATA 'com.tabburrito.e2etest') -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'com.tabburrito.e2etest') -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # The uninstaller leaves the (portable) sessions and logs; this folder is
+    # the test product's own, so remove it.
+    if ((Split-Path -Leaf $InstallDir) -eq $Product -and (Test-Path -LiteralPath $InstallDir)) {
+        Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     if (-not $KeepArtifacts -and (Test-Path -LiteralPath $Work)) {
         Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue
