@@ -563,8 +563,11 @@ const LINKEDIN_FEED_FOCUS_JS: &str = r#"
         // The post's own heading ("Feed post") sits above the author too.
         const h = post.querySelector('h1, h2, h3, h4, h5, h6');
         const heading = h ? (h.innerText || '').trim() : '';
-        const context = lines.slice(0, idx).filter(l => l !== heading).join(' ');
-        if (context) return FOLLOWS_RE.test(context) ? 'followed-by' : 'keep';
+        const context = lines.slice(0, idx).filter(l => l !== heading);
+        // Each context line on its own: a short "Followed by X" / "X follows Y" line.
+        if (context.length) {
+            return context.some(l => l.length <= 160 && FOLLOWS_RE.test(l)) ? 'followed-by' : 'keep';
+        }
         const follow = [...post.querySelectorAll('button[aria-label]')]
             .some(b => b.getAttribute('aria-label') === 'Follow ' + author);
         return follow ? 'stranger' : 'keep';
@@ -579,6 +582,13 @@ const LINKEDIN_FEED_FOCUS_JS: &str = r#"
             if (!author || !post || post.closest('aside, nav, header, footer')) continue;
             // Already hidden by the ad blocker: nothing to decide.
             if (post.closest('[data-tb-hidden="1"]')) continue;
+            // LinkedIn may reuse a post element for another author: drop the old
+            // verdict first, or a post this filter hid would stay hidden unread.
+            const seen = post.getAttribute('data-tb-focus');
+            if (seen !== null && seen !== author) {
+                post.removeAttribute('data-tb-focus');
+                post.removeAttribute('data-tb-why');
+            }
             // Hidden by something else (e.g. the language filter): its text
             // has no line breaks to read, and it is not on screen anyway.
             if (!post.getClientRects().length) continue;
@@ -591,10 +601,29 @@ const LINKEDIN_FEED_FOCUS_JS: &str = r#"
             if (kind === 'keep') post.removeAttribute('data-tb-why');
             else post.setAttribute('data-tb-why', kind);
         }
+        breaker();
+    }
+
+    // Circuit breaker. Hiding most of the feed is normal here (about 70% on the
+    // live feed, 2026-11-27), so the ad blocker's 60% cap does not fit. But if
+    // nearly every checked post is hidden, the rule has misread the page:
+    // show everything again and stop until the switch is toggled.
+    let tripped = false;
+    function breaker() {
+        const checked = document.querySelectorAll('[data-tb-focus]').length;
+        const hidden = document.querySelectorAll('[data-tb-focus][data-tb-why]').length;
+        if (checked >= 10 && hidden / checked > 0.9) {
+            tripped = true;
+            window.__tbLiFocusOn = false;
+            document.querySelectorAll('[data-tb-why]').forEach(el => el.removeAttribute('data-tb-why'));
+            console.warn('[Tabburrito] feed focus paused: ' + hidden + ' of ' + checked +
+                ' posts matched, which means the page was misread');
+        }
     }
 
     window.__tbSetLiFocus = function(on) {
         window.__tbLiFocusOn = !!on;
+        tripped = false;
         document.querySelectorAll('[data-tb-focus]').forEach(el => {
             el.removeAttribute('data-tb-focus');
             el.removeAttribute('data-tb-why');
@@ -603,7 +632,7 @@ const LINKEDIN_FEED_FOCUS_JS: &str = r#"
     };
 
     window.__tbLiFocusStats = function() {
-        const out = { stranger: 0, 'followed-by': 0, checked: 0 };
+        const out = { stranger: 0, 'followed-by': 0, checked: 0, tripped };
         document.querySelectorAll('[data-tb-focus]').forEach(el => {
             out.checked++;
             const w = el.getAttribute('data-tb-why');

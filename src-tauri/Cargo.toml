@@ -1,6 +1,6 @@
 [package]
 name = "tabburrito"
-version = "0.2.0"
+version = "0.2.1"
 description = "Lightweight multi-service web app dock"
 edition = "2021"
 

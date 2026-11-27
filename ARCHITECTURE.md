@@ -82,6 +82,7 @@ The WebView2 shell owns:
   first / Most relevant first" menu (renamed from "Sort by" in 2026-11); the
   feed type is also readable from item `componentkey` suffixes
   (`MAIN_FEED_RECENT` / `MAIN_FEED_RELEVANCE`). At most 3 attempts a minute.
+- `LINKEDIN_FEED_FOCUS_JS` (Settings > LinkedIn > "Hide posts from strangers", default on) hides, on the home feed only, posts from people you do not follow that no contact liked or reposted, and "Followed by" posts. It has a circuit breaker that stops hiding if the page markup stops matching, re-checks recycled feed elements, and matches "follows" per line. Offline test: `node tests/linkedin-focus.test.js` (fake DOM, reads the const from `src-tauri/src/main.rs`).
 - `X_CLEANUP_JS` (on page load, gated by the AdBlock toggle) hides promoted
   posts (`placementTracking`, "Ad" label), timeline modules such as "Who to
   follow", the right column except search, and Grok/Premium nav entries; it

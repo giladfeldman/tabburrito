@@ -14,5 +14,17 @@
 - Home feed (`/feed/`) only: on a stranger's profile page every post would match.
 - `innerText` of a `display:none` post has no line breaks, so skip posts that are not
   rendered (`getClientRects().length === 0`) rather than misread them.
+- Measured on the live feed 2026-11-27: of ~25-30 posts checked, 14-15 strangers and 6-7
+  "Followed by" posts hidden (~70%), 0 left undecided; no false hide seen in a screenshot
+  review of the remaining feed (a by-eye count, not a full audit).
+- Because ~70% hidden is normal, the ad blocker's 60% cap does not fit. The focus filter has
+  its own breaker: with 10+ posts checked and more than 90% matched, it shows everything
+  and pauses until the switch is toggled (`__tbLiFocusStats().tripped`).
+- LinkedIn may reuse a post element for another author; a stale verdict on a hidden element
+  is cleared when the author changes, before the "not rendered" skip.
+- A connection you have unfollowed shows a Follow button and is hidden as a stranger. That
+  matches the Settings wording ("people you don't follow").
+- Offline test: `node tests/linkedin-focus.test.js` (fake DOM; each rule watched failing on
+  the earlier version).
 - Matching is English-UI text (aria-labels, "Followed by"); a LinkedIn UI language change
   would make the filter do nothing, not hide wrongly.

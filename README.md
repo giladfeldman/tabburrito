@@ -64,6 +64,7 @@ The WebView2 app is optimized around a small service workspace:
 - cold-load after inactivity: Messenger, LinkedIn, and Bluesky
 - cold services are restored automatically when selected
 - LinkedIn ad/noise blocking is enabled by default
+- LinkedIn "Hide posts from strangers" (Settings, on by default) hides home-feed posts from people you do not follow that no contact touched, and "Followed by" posts
 - new windows are opened in the system default browser
 - app data is stored relative to the portable exe
 
@@ -90,6 +91,8 @@ Build both maintained tracks:
 ```
 
 Build outputs are intentionally ignored by git and live under `build\`.
+
+Offline test for the LinkedIn feed-focus filter (no browser needed): `node tests/linkedin-focus.test.js`.
 
 ## Runtime Data Rules
 
@@ -134,6 +137,6 @@ This software is licensed under the [GNU Affero General Public License v3.0](LIC
 
 **How to cite.** If you use this software in research, please cite it. GitHub's *Cite this repository* button (from [CITATION.cff](CITATION.cff)) gives APA and BibTeX. In APA style:
 
-> Feldman, G. (2026). *tabburrito: Portable multi-service web app dock built with Tauri and WebView2* (Version 0.2.0) [Computer software]. https://github.com/giladfeldman/tabburrito
+> Feldman, G. (2026). *tabburrito: Portable multi-service web app dock built with Tauri and WebView2* (Version 0.2.1) [Computer software]. https://github.com/giladfeldman/tabburrito
 
 <!-- license-citation:end -->
