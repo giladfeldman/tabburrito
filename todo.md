@@ -218,3 +218,7 @@ Session sync is the risky part and is deliberately NOT bundled with it.
 ## LinkedIn
 
 - [ ] [MED · soon · val:med · S · sonnet-medium] Fix LinkedIn blocker 60% safety cap: it counts 3 wrappers per post, so it can never trip (src: src-tauri/src/main.rs LINKEDIN_ADBLOCK_JS POST_COUNT_SELECTOR; live probe 2026-11-27: each post has expanded/update-card-focus/replaceableCommentTools wrappers all matching [componentkey*=FeedType], only one gets data-tb-hidden) ^d-1dddc1
+
+## Release pipeline
+
+- [ ] [MED · soon · val:high · S · sonnet-medium] Make tabburrito-cleanup bump the version: since signed releases (v0.2.0) every release needs a higher version, but its Phase 6 still says no versioned artifact (src: release run 2026-11-27, cleanup envelope) ^d-1b94a1
