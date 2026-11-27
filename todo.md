@@ -222,3 +222,4 @@ Session sync is the risky part and is deliberately NOT bundled with it.
 ## Release pipeline
 
 - [ ] [MED · soon · val:high · S · sonnet-medium] Make tabburrito-cleanup bump the version: since signed releases (v0.2.0) every release needs a higher version, but its Phase 6 still says no versioned artifact (src: release run 2026-11-27, cleanup envelope) ^d-1b94a1
+- [ ] [LOW · later · val:med · S · sonnet-medium] Updater E2E test: genuine install stalled once under heavy load (run 2 of 3 on 2026-11-27); find the timeout and make it load-tolerant or report a stall separately (src: install/Tests/Test-UpdaterEndToEnd.ps1) ^d-9bd23c

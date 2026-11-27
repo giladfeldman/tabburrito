@@ -198,7 +198,9 @@ try {
     # --- Install A ----------------------------------------------------------
     Start-Process -FilePath $setupA -ArgumentList '/S', '/NS' -Wait
     Check 'install A into %LOCALAPPDATA%\Programs\<product> (patched default, not the sessions folder)' (
-        (Get-ExeVersion) -eq $VersionA -and -not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "$Product\$Product.exe"))
+        # Not the exe's ProductVersion: that comes from Cargo.toml (see Get-ExeHash),
+        # so it matched $VersionA only while the repo itself was at 0.2.0.
+        (Get-ExeHash) -ne '' -and -not (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "$Product\$Product.exe"))
     ) "exe version '$(Get-ExeVersion)' at $Exe"
     $hashA = Get-ExeHash
     Check 'installed by setup (uninstall.exe present)' (Test-Path -LiteralPath (Join-Path $InstallDir 'uninstall.exe'))
