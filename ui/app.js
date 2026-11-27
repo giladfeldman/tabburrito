@@ -559,7 +559,7 @@ function applySettingsChange(change) {
       // saveState() with no change.
       return;
     default:
-      return; // linkedinSort / linkedinAdblock are owned by the URL bar
+      return; // linkedinSort / linkedinAdblock / linkedinFocus are owned by the URL bar
   }
   saveState();
 }

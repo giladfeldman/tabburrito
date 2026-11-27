@@ -3,6 +3,7 @@
 One line per lesson card, newest first. Written by `lessons-split.py`; grep it for your
 area, open only the cards that apply. Active rules: [../lessons.md](../lessons.md).
 
+- [LinkedIn Feed Focus (2026-11-27)](2026-11-27-linkedin-feed-focus.md)
 - [Release-Based Updates (2026-11-19)](2026-11-19-release-based-updates.md)
 - [Testing Against The Live Sites (2026-11-04)](2026-11-04-testing-against-the-live-sites.md)
 - [WebView2 Is Main Again After Optimization](undated-webview2-is-main-again-after-optimization.md)

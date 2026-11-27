@@ -15,6 +15,7 @@ let zoomLevels = {}; // { serviceId: zoomPercent }
 let adblockByService = {}; // { serviceId: bool }
 let closedServices = {}; // { serviceId: bool }
 let linkedinFeedSort = 'recent'; // 'recent' | 'top'
+let linkedinFocus = true; // hide strangers' posts and "Followed by" posts
 let lastGoodUrls = {}; // { serviceId: url }
 let hideForeign = {}; // { serviceId: bool } — hide non-English posts
 const LANG_FILTER_SERVICES = ['linkedin', 'bluesky', 'x'];
@@ -28,6 +29,7 @@ function loadState() {
     lastGoodUrls = s.lastGoodUrls || {};
     hideForeign = s.hideForeign || {};
     linkedinFeedSort = s.linkedinFeedSort === 'top' ? 'top' : 'recent';
+    linkedinFocus = s.linkedinFocus !== false;
     // Load custom URLs
     if (s.urls) {
       for (const svc of SERVICES) {
@@ -46,6 +48,7 @@ function saveState() {
     closed: closedServices,
     urls: urls,
     linkedinFeedSort: linkedinFeedSort,
+    linkedinFocus: linkedinFocus,
     lastGoodUrls: lastGoodUrls,
     hideForeign: hideForeign,
   }));
@@ -98,6 +101,14 @@ function syncLinkedInFeedSort() {
   if (!window.__TAURI__) return;
   window.__TAURI__.core.invoke('set_linkedin_feed_sort', {
     sort: linkedinFeedSort,
+  }).catch(() => {});
+}
+
+// Takes effect at once, no reload: the page-side script only switches on/off.
+function syncLinkedInFocus() {
+  if (!window.__TAURI__) return;
+  window.__TAURI__.core.invoke('set_linkedin_focus', {
+    enabled: linkedinFocus,
   }).catch(() => {});
 }
 
@@ -336,6 +347,7 @@ if (window.__TAURI__) {
     }).catch(() => {});
   });
   syncLinkedInFeedSort();
+  syncLinkedInFocus();
   LANG_FILTER_SERVICES.forEach(syncLangFilter);
   SERVICES.forEach(svc => {
     pushServiceUrlToRust(svc.id, svc.url);
@@ -364,6 +376,10 @@ if (window.__TAURI__) {
         // The blocker is injected on page load, so toggling it only takes
         // effect after a reload — same as the indicator's click handler.
         window.__TAURI__.core.invoke('reload_service', { label: 'linkedin' }).catch(() => {});
+      } else if (key === 'linkedinFocus') {
+        linkedinFocus = !!value;
+        saveState();
+        syncLinkedInFocus();
       }
     }).catch(() => {});
 
@@ -372,6 +388,7 @@ if (window.__TAURI__) {
       window.__TAURI__.event.emit('tb-settings-state', {
         linkedinSort: linkedinFeedSort,
         linkedinAdblock: getAdblock('linkedin'),
+        linkedinFocus: linkedinFocus,
       });
     }).catch(() => {});
   }

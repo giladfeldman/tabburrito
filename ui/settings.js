@@ -37,6 +37,7 @@ let state = {
   serviceMutes: {},
   linkedinSort: 'recent',
   linkedinAdblock: false,
+  linkedinFocus: true,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -169,6 +170,7 @@ function renderAll() {
   $('set-dnd').value = dndSelectValue();
   $('set-linkedin-sort').value = state.linkedinSort;
   $('set-linkedin-adblock').checked = state.linkedinAdblock;
+  $('set-linkedin-focus').checked = state.linkedinFocus;
   updateDndNote();
   renderNotifyRows();
   renderMuteRows();
@@ -328,6 +330,19 @@ function init() {
     } catch (err) {
       e.target.checked = !want;
       state.linkedinAdblock = !want;
+    }
+  });
+
+  // Same rule as the blocker: only claim the change once Rust accepted it.
+  $('set-linkedin-focus').addEventListener('change', async (e) => {
+    const want = e.target.checked;
+    try {
+      await invoke('set_linkedin_focus', { enabled: want });
+      state.linkedinFocus = want;
+      emit('tb-settings-change', { key: 'linkedinFocus', value: want });
+    } catch (err) {
+      e.target.checked = !want;
+      state.linkedinFocus = !want;
     }
   });
 

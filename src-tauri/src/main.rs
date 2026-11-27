@@ -517,6 +517,127 @@ const LINKEDIN_ADBLOCK_JS: &str = r#"
 })();
 "#;
 
+// LinkedIn feed focus — hides two kinds of home-feed post that carry no
+// "Promoted" label, so the blocker above cannot see them:
+//   1. "stranger": the author is someone you do not follow (the post has a
+//      "Follow <author>" button) and nobody you know liked, reposted or
+//      commented on it (no context line above the author's name);
+//   2. "followed-by": the context line says who one of your contacts
+//      follows ("Followed by X").
+// Separate from the ad blocker and switchable without a reload
+// (Settings → LinkedIn). Home feed only, so a stranger's profile page
+// still shows their posts. DOM-volatility policy matches
+// LINKEDIN_ADBLOCK_JS: aria-labels and visible text only, never hashed
+// class names; one post per decision (a wrapper holding two posts'
+// menus is refused). Verified on the live feed 2026-11-27.
+const LINKEDIN_FEED_FOCUS_JS: &str = r#"
+(function() {
+    'use strict';
+    if (window.__tbLiFocusInstalled) return;
+    window.__tbLiFocusInstalled = true;
+    if (window.__tbLiFocusOn === undefined) window.__tbLiFocusOn = true;
+
+    const MENU_PREFIX = 'Open control menu for post by ';
+    const POST_SELECTOR =
+        '[componentkey*="FeedType"], .feed-shared-update-v2, ' +
+        'article[data-id*="urn:li:activity"], [data-id*="urn:li:activity"]';
+    const FOLLOWS_RE = /^followed by\b|\bfollows\b/i;
+
+    if (!document.getElementById('tb-li-focus-css')) {
+        const s = document.createElement('style');
+        s.id = 'tb-li-focus-css';
+        s.textContent = '[data-tb-why] { display: none !important; }';
+        (document.head || document.documentElement).appendChild(s);
+    }
+
+    function onHomeFeed() {
+        const p = location.pathname;
+        return p === '/feed/' || p === '/feed';
+    }
+
+    // Returns 'followed-by', 'stranger', 'keep', or null (not rendered yet).
+    function classify(post, author) {
+        const lines = (post.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
+        const idx = lines.indexOf(author);
+        if (idx < 0) return null;
+        // The post's own heading ("Feed post") sits above the author too.
+        const h = post.querySelector('h1, h2, h3, h4, h5, h6');
+        const heading = h ? (h.innerText || '').trim() : '';
+        const context = lines.slice(0, idx).filter(l => l !== heading).join(' ');
+        if (context) return FOLLOWS_RE.test(context) ? 'followed-by' : 'keep';
+        const follow = [...post.querySelectorAll('button[aria-label]')]
+            .some(b => b.getAttribute('aria-label') === 'Follow ' + author);
+        return follow ? 'stranger' : 'keep';
+    }
+
+    function scan() {
+        if (!window.__tbLiFocusOn || !onHomeFeed()) return;
+        const menus = document.querySelectorAll('button[aria-label^="' + MENU_PREFIX + '"]');
+        for (const menu of menus) {
+            const author = menu.getAttribute('aria-label').slice(MENU_PREFIX.length).trim();
+            const post = menu.closest(POST_SELECTOR);
+            if (!author || !post || post.closest('aside, nav, header, footer')) continue;
+            // Already hidden by the ad blocker: nothing to decide.
+            if (post.closest('[data-tb-hidden="1"]')) continue;
+            // Hidden by something else (e.g. the language filter): its text
+            // has no line breaks to read, and it is not on screen anyway.
+            if (!post.getClientRects().length) continue;
+            if (post.getAttribute('data-tb-focus') === author) continue;
+            // One post only: refuse a wrapper that holds two posts' menus.
+            if (post.querySelectorAll('button[aria-label^="' + MENU_PREFIX + '"]').length > 1) continue;
+            const kind = classify(post, author);
+            if (!kind) continue;
+            post.setAttribute('data-tb-focus', author);
+            if (kind === 'keep') post.removeAttribute('data-tb-why');
+            else post.setAttribute('data-tb-why', kind);
+        }
+    }
+
+    window.__tbSetLiFocus = function(on) {
+        window.__tbLiFocusOn = !!on;
+        document.querySelectorAll('[data-tb-focus]').forEach(el => {
+            el.removeAttribute('data-tb-focus');
+            el.removeAttribute('data-tb-why');
+        });
+        if (window.__tbLiFocusOn) scan();
+    };
+
+    window.__tbLiFocusStats = function() {
+        const out = { stranger: 0, 'followed-by': 0, checked: 0 };
+        document.querySelectorAll('[data-tb-focus]').forEach(el => {
+            out.checked++;
+            const w = el.getAttribute('data-tb-why');
+            if (w) out[w]++;
+        });
+        return out;
+    };
+
+    let timer;
+    const obs = new MutationObserver(() => {
+        clearTimeout(timer);
+        timer = setTimeout(scan, 300);
+    });
+    function start() {
+        if (!document.body) { setTimeout(start, 50); return; }
+        obs.observe(document.body, { childList: true, subtree: true });
+        scan();
+    }
+    start();
+    setInterval(scan, 5000);
+    console.log('[Tabburrito] LinkedIn feed focus active');
+})();
+"#;
+
+fn linkedin_focus_eval_js(on: bool) -> String {
+    let mut js = String::with_capacity(LINKEDIN_FEED_FOCUS_JS.len() + 128);
+    js.push_str(&format!("window.__tbLiFocusOn = {on};\n"));
+    js.push_str(LINKEDIN_FEED_FOCUS_JS);
+    js.push_str(&format!(
+        "\nif (typeof window.__tbSetLiFocus === 'function') window.__tbSetLiFocus({on});"
+    ));
+    js
+}
+
 // Cookie / consent banner suppressor — injected into EVERY service tab at
 // document start, in every frame (CMPs usually live in an iframe).
 //
@@ -1910,6 +2031,29 @@ impl LangFilterState {
     }
 }
 
+/// LinkedIn feed focus (hide strangers' posts and "Followed by" posts). On by
+/// default; the URL bar owns the persisted value and pushes it here at
+/// startup and on every change.
+struct LinkedInFocusState {
+    enabled: std::sync::atomic::AtomicBool,
+}
+
+impl LinkedInFocusState {
+    fn new() -> Self {
+        Self {
+            enabled: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    fn get(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set(&self, on: bool) {
+        self.enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Tracking prevention: STRICT in normal use, BALANCED while any tab is on a
 /// sign-in / verification page.
 ///
@@ -2920,6 +3064,8 @@ fn create_service_webview(app: &tauri::AppHandle, service: &'static Service) -> 
                 }
                 let sort = app_handle_for_page.state::<LinkedInSortState>().get();
                 let _ = webview.eval(linkedin_feed_sort_eval_js(&sort));
+                let focus = app_handle_for_page.state::<LinkedInFocusState>().get();
+                let _ = webview.eval(linkedin_focus_eval_js(focus));
             } else if svc_id == "x" && adblock_on {
                 let _ = webview.eval(X_CLEANUP_JS);
             }
@@ -3091,6 +3237,15 @@ async fn get_service_mutes(app: tauri::AppHandle) -> Result<HashMap<String, bool
 async fn set_linkedin_feed_sort(app: tauri::AppHandle, sort: String) -> Result<(), String> {
     app.state::<LinkedInSortState>().set(&sort);
     apply_linkedin_sort_to_webview(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_linkedin_focus(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    app.state::<LinkedInFocusState>().set(enabled);
+    if let Some(wv) = app.get_webview("linkedin") {
+        let _ = wv.eval(linkedin_focus_eval_js(enabled));
+    }
     Ok(())
 }
 
@@ -3410,6 +3565,7 @@ fn main() {
         .manage(WebviewState::new())
         .manage(MuteState::new())
         .manage(LinkedInSortState::new())
+        .manage(LinkedInFocusState::new())
         .manage(NotifyState::new())
         .manage(AppPrefsState::new())
         .manage(ServiceUrlState::new())
@@ -3425,6 +3581,7 @@ fn main() {
             set_adblock_service,
             set_muted,
             set_linkedin_feed_sort,
+            set_linkedin_focus,
             set_unload_seconds,
             set_service_url,
             backup_portable_state,
